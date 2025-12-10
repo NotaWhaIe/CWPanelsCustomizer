@@ -59,6 +59,9 @@
   <ItemGroup>
     <EmbeddedResource Include="Images\a1.png" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="Test\Никите_КРСТ_НВФ_Технология_В2.rvt" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>xcopy /Y /F "$(SolutionDir)\CWPanelsCustomizer\bin\Debug\CWPanelsCustomizer.dll" "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022"</PostBuildEvent>
