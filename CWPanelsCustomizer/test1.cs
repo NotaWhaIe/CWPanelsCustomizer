@@ -55,13 +55,15 @@ namespace CWPanelsCustomizer
             {
                 tg.Start();
 
-                // 1) Сбор данных (первый метод)
+                // 0) Сбор данных (первый метод)
                 List<CurtainWallDataDto> data = GetElements(_doc);
 
-
+                // 1) Сброс рядовых панелей (второй метод фасада)
+                ResetRegularPanelsCutsForIntersectingOpenings(data);
 
                 // 2) Настройка рядовых кассет (принимает DTO из первого метода)
                 CalculateAndSetRegularPanelsCuts(data);
+
 
                 // UI/статистика как часть фасада (пока оставляем тут)
                 int totalOpenings = GetTotalOpeningsCount(_doc);
@@ -75,25 +77,167 @@ namespace CWPanelsCustomizer
                 Debug.WriteLine($"[CWPanelsCustomizer] Walls in work: {wallsInWork}");
                 Debug.WriteLine($"[CWPanelsCustomizer] Total assigned openings: {totalAssignedOpenings}");
 
-                TaskDialog td = new TaskDialog("CWPanelsCustomizer");
-                td.MainIcon = TaskDialogIcon.TaskDialogIconInformation;
-                td.Title = "Статистика по витражам и проёмам";
-                td.TitleAutoPrefix = false;
-                td.MainInstruction = "Сбор данных завершён";
-                td.MainContent =
-                    $"Всего проёмов (#_Оконный проем_Прямоугольный): {totalOpenings}\n" +
-                    $"Всего витражей (OST_Walls с CurtainGrid): {totalCurtainWalls}\n" +
-                    $"Витражей в работе (пересекаются с проёмами): {wallsInWork}\n" +
-                    $"Связок витраж → проёмы (всего проёмов в работе): {totalAssignedOpenings}";
-                td.CommonButtons = TaskDialogCommonButtons.Ok;
-                td.DefaultButton = TaskDialogResult.Ok;
-                td.Show();
+                //TaskDialog td = new TaskDialog("CWPanelsCustomizer");
+                //td.MainIcon = TaskDialogIcon.TaskDialogIconInformation;
+                //td.Title = "Статистика по витражам и проёмам";
+                //td.TitleAutoPrefix = false;
+                //td.MainInstruction = "Сбор данных завершён";
+                //td.MainContent =
+                //    $"Всего проёмов (#_Оконный проем_Прямоугольный): {totalOpenings}\n" +
+                //    $"Всего витражей (OST_Walls с CurtainGrid): {totalCurtainWalls}\n" +
+                //    $"Витражей в работе (пересекаются с проёмами): {wallsInWork}\n" +
+                //    $"Связок витраж → проёмы (всего проёмов в работе): {totalAssignedOpenings}";
+                //td.CommonButtons = TaskDialogCommonButtons.Ok;
+                //td.DefaultButton = TaskDialogResult.Ok;
+                //td.Show();
 
                 tg.Assimilate();
             }
 
             Debug.WriteLine("[CWPanelsCustomizer] Execute END");
             return Result.Succeeded;
+        }
+        private void ResetRegularPanelsCutsForIntersectingOpenings(List<CurtainWallDataDto> data)
+        {
+            const string TAG = "[ResetRegularPanelsCutsForIntersectingOpenings]";
+            const string REGULAR_PANEL_FAMILY = "КРСТ_НВФ_Рядовая_В3";
+            System.Diagnostics.Debug.WriteLine($"{TAG} START");
+
+            if (data == null || data.Count == 0)
+            {
+                System.Diagnostics.Debug.WriteLine($"{TAG} data is null/empty -> END");
+                return;
+            }
+
+            int wallsProcessed = 0;
+            int openingsProcessed = 0;
+            int panelsTouched = 0;
+            int paramsSet = 0;
+
+            try
+            {
+                using (var t = new Transaction(_doc, "Сброс подрезок рядовых панелей по пересечению с проёмами"))
+                {
+                    t.Start();
+
+                    foreach (var wallDto in data)
+                    {
+                        if (wallDto == null || wallDto.CurtainWallElement == null)
+                            continue;
+
+                        wallsProcessed++;
+
+                        var openings = wallDto.IntersectingOpenings ?? new List<OpeningModelDto>();
+                        var panels = wallDto.Panels ?? new List<CurtainWallPanelDto>();
+
+                        System.Diagnostics.Debug.WriteLine($"{TAG} wallId={wallDto.Id?.IntegerValue}, openings={openings.Count}, panels={panels.Count}");
+
+                        if (openings.Count == 0 || panels.Count == 0)
+                            continue;
+
+                        foreach (var opening in openings)
+                        {
+                            if (opening == null || opening.OpeningElement == null)
+                                continue;
+
+                            openingsProcessed++;
+
+                            var opLocal = opening.LocalBoundingBox;
+                            if (opLocal == null)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue} opLocal=null skip");
+                                continue;
+                            }
+
+                            System.Diagnostics.Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, opLocalMin=({opLocal.Min.X:F4},{opLocal.Min.Y:F4},{opLocal.Min.Z:F4}), opLocalMax=({opLocal.Max.X:F4},{opLocal.Max.Y:F4},{opLocal.Max.Z:F4})");
+
+                            // Находим панели, которые пересекаются с этим проёмом (в локальной СК витража)
+                            var intersectingPanels = new List<CurtainWallPanelDto>();
+
+                            foreach (var p in panels)
+                            {
+                                if (p == null || p.PanelElement == null)
+                                    continue;
+
+                                // Только рядовые панели
+                                var fam = p.PanelElement.Symbol?.Family?.Name ?? "";
+                                if (!fam.Contains(REGULAR_PANEL_FAMILY))
+                                    continue;
+
+                                var pLocal = p.LocalBoundingBox;
+                                if (pLocal == null)
+                                    continue;
+
+                                if (BoundingBoxesIntersectLocal(opLocal, pLocal))
+                                    intersectingPanels.Add(p);
+                            }
+
+                            System.Diagnostics.Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, intersectingRegularPanels={intersectingPanels.Count}");
+
+                            // Сброс подрезок у пересекающихся панелей
+                            foreach (var p in intersectingPanels)
+                            {
+                                var fi = p.PanelElement;
+
+                                bool set1 = TrySetDouble(fi, "Подрезка", 0.0);
+                                bool set2 = TrySetDouble(fi, "Подрезка_Верх", 0.0);
+                                bool set3 = TrySetDouble(fi, "Подрезка_Низ", 0.0);
+
+                                panelsTouched++;
+                                if (set1) paramsSet++;
+                                if (set2) paramsSet++;
+                                if (set3) paramsSet++;
+
+                                System.Diagnostics.Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, panelId={fi.Id.IntegerValue}, reset(Подрезка={set1}, Подрезка_Верх={set2}, Подрезка_Низ={set3})");
+                            }
+                        }
+                    }
+
+                    t.Commit();
+                }
+
+                System.Diagnostics.Debug.WriteLine($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, panelsTouched={panelsTouched}, paramsSet={paramsSet}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"{TAG} ERROR: {ex}");
+                TaskDialog.Show("ResetRegularPanelsCutsForIntersectingOpenings", ex.Message);
+            }
+
+            // --- локальные хелперы (инкапсулированы в методе) ---
+            bool BoundingBoxesIntersectLocal(BoundingBoxXYZ a, BoundingBoxXYZ b)
+            {
+                if (a == null || b == null) return false;
+                return !(a.Max.X < b.Min.X || a.Min.X > b.Max.X ||
+                         a.Max.Y < b.Min.Y || a.Min.Y > b.Max.Y ||
+                         a.Max.Z < b.Min.Z || a.Min.Z > b.Max.Z);
+            }
+
+            bool TrySetDouble(FamilyInstance fi, string paramName, double value)
+            {
+                try
+                {
+                    var p = fi.LookupParameter(paramName);
+                    if (p == null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} param '{paramName}' not found");
+                        return false;
+                    }
+                    if (p.IsReadOnly)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} param '{paramName}' is read-only");
+                        return false;
+                    }
+                    // Ставим в feet (как и остальные расчёты/параметры в Revit)
+                    p.Set(value);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} set '{paramName}' failed: {ex.Message}");
+                    return false;
+                }
+            }
         }
 
         private void CalculateAndSetRegularPanelsCuts(List<CurtainWallDataDto> data)
