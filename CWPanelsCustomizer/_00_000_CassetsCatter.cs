@@ -42,8 +42,6 @@ namespace CWPanelsCustomizer
             {
                 tg.Start();
 
-                TaskDialog.Show("test", "test");
-
                 ResetPanels(); // Сбрасывает подрезки рядовых панелей в 0
                 ReplacePanelsWithСutoutPanels(); // Замена рядовых панелей на угловые в углах окна 
                 CalculateAndSetPanelCutout();   // Считает Вырез_Ширина/Высота на угловых панелях  
