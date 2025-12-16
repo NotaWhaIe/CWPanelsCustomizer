@@ -66,6 +66,7 @@
   <ItemGroup>
     <Compile Include="Helpers\SphereByPoint.cs" />
     <Compile Include="test1.cs" />
+    <Compile Include="test2.cs" />
     <Compile Include="_00_000_CassetsCatter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Helpers\ClassTemplate.cs" />

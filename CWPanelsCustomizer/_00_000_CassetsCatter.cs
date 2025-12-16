@@ -13,7 +13,7 @@ namespace CWPanelsCustomizer
     {
         // Метаданные команды
         public static string IS_TAB_NAME => "#BIM";
-        public static string IS_NAME => "!!Настройщик кассет";
+        public static string IS_NAME => "Настройщик кассет (старый)";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
         public static string IS_DESCRIPTION => "Настраивает кассету по окну";
 

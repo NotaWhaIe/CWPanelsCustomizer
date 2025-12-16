@@ -36,7 +36,7 @@ namespace CWPanelsCustomizer
     [Transaction(TransactionMode.Manual)]
     public class test1 : IExternalCommand
     {
-        public static string IS_NAME => "*Название плагина";
+        public static string IS_NAME => "!!!!!_Настроить кассеты";
         public static string IS_DESCRIPTION => "*Что делает плагин?";
         public static string IS_TAB_NAME => "#BIM";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
