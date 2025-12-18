@@ -44,69 +44,585 @@ namespace CWPanelsCustomizer
         private UIDocument _uidoc;
         private Document _doc;
 
-        // --- Common constants ---
-        private const string REGULAR_PANEL_FAMILY = "КРСТ_НВФ_Рядовая_В3";
-        private const string OPENING_FAMILY_MARKER = "#_Оконный проем_Прямоугольный";
+        private const double EPS = 1e-9;
+        private const double FEET_TO_MM = 304.8;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             _uidoc = commandData.Application.ActiveUIDocument;
             _doc = _uidoc.Document;
 
-            Log("[CWPanelsCustomizer] Execute START");
+            Debug.WriteLine("[CWPanelsCustomizer] Execute START");
 
-            using (var tg = new TransactionGroup(_doc, IS_NAME))
+            using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
             {
                 tg.Start();
 
                 // 0) Сбор данных
                 List<CurtainWallDataDto> data = GetElements(_doc);
 
-                // 1) Сброс подрезок рядовых панелей
+                // 1) Сброс рядовых панелей
                 ResetRegularPanelsCutsForIntersectingOpenings(data);
 
-                // 2) Замена рядовых на угловые в местах реальных углов проёмов
+                // 2) Замена рядовых панелей на угловые (где это действительно нужно)
                 ReplaceRegularPanelsWithCutoutPanels(data);
 
-                // FIX: НЕ ВЫЗЫВАЕМ _doc.Regenerate() тут, т.к. мы вне Transaction -> InvalidOperationException
-
-                // 3) Настройка рядовых кассет (берём свежие bbox внутри Transaction + Regenerate)
+                // 3) Настройка рядовых кассет (установка подрезок)
                 CalculateAndSetRegularPanelsCuts(data);
 
-                // summary
+                // 4) Настройка угловых панелей с вырезами (на базе значений рядовых)
+                CalculateAndSetCutoutPanelsCuts(data);
+
                 int totalOpenings = GetTotalOpeningsCount(_doc);
                 int totalCurtainWalls = GetTotalCurtainWallsCount(_doc);
-                int wallsInWork = data?.Count ?? 0;
-                int totalAssignedOpenings = data?.Sum(x => x?.IntersectingOpenings?.Count ?? 0) ?? 0;
+                int wallsInWork = data.Count;
+                int totalAssignedOpenings = data.Sum(x => x.IntersectingOpenings.Count);
 
-                Log("[CWPanelsCustomizer] Summary:");
-                Log($"[CWPanelsCustomizer] Total openings: {totalOpenings}");
-                Log($"[CWPanelsCustomizer] Total curtain walls: {totalCurtainWalls}");
-                Log($"[CWPanelsCustomizer] Walls in work: {wallsInWork}");
-                Log($"[CWPanelsCustomizer] Total assigned openings: {totalAssignedOpenings}");
+                Debug.WriteLine("[CWPanelsCustomizer] Summary:");
+                Debug.WriteLine($"[CWPanelsCustomizer] Total openings: {totalOpenings}");
+                Debug.WriteLine($"[CWPanelsCustomizer] Total curtain walls: {totalCurtainWalls}");
+                Debug.WriteLine($"[CWPanelsCustomizer] Walls in work: {wallsInWork}");
+                Debug.WriteLine($"[CWPanelsCustomizer] Total assigned openings: {totalAssignedOpenings}");
 
                 tg.Assimilate();
             }
 
-            Log("[CWPanelsCustomizer] Execute END");
+            Debug.WriteLine("[CWPanelsCustomizer] Execute END");
             return Result.Succeeded;
+        }
+
+        private void CalculateAndSetCutoutPanelsCuts(List<CurtainWallDataDto> data)
+        {
+            const string TAG = "[CalculateAndSetCutoutPanelsCuts]";
+            const string REGULAR_FAMILY = "КРСТ_НВФ_Рядовая_В3";
+            const string CUTOUT_TOP_FAMILY = "КРСТ_НВФ_С Г-образным вырезом_В2";
+            const string CUTOUT_BOTTOM_FAMILY = "КРСТ_НВФ_С L-образным вырезом";
+
+            const string REG_PARAM_HOR = "Подрезка";
+            const string REG_PARAM_TOP_HEIGHT = "Подрезка_Низ";   // для верхних углов
+            const string REG_PARAM_BOTTOM_HEIGHT = "Подрезка_Верх"; // для нижних углов
+
+            const string CUT_PARAM_W = "Вырез_Ширина";
+            const string CUT_PARAM_H = "Вырез_Высота";
+
+            const double CHECK_SEGMENT_LENGTH_FT = 0.328084; // 100 мм
+            const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;
+
+            Debug.WriteLine($"{TAG} START");
+
+            if (data == null || data.Count == 0)
+            {
+                Debug.WriteLine($"{TAG} data is null/empty -> END");
+                return;
+            }
+
+            // --- локальные хелперы (как в Replace, но не меняем поведение) ---
+            XYZ GetCenter(BoundingBoxXYZ b) =>
+                new XYZ((b.Min.X + b.Max.X) * 0.5, (b.Min.Y + b.Max.Y) * 0.5, (b.Min.Z + b.Max.Z) * 0.5);
+
+            BoundingBoxXYZ Reduce(BoundingBoxXYZ b, double factor)
+            {
+                var c = GetCenter(b);
+                double hx = (b.Max.X - b.Min.X) * 0.5 * factor;
+                double hy = (b.Max.Y - b.Min.Y) * 0.5 * factor;
+                double hz = (b.Max.Z - b.Min.Z) * 0.5 * factor;
+
+                return new BoundingBoxXYZ
+                {
+                    Min = new XYZ(c.X - hx, c.Y - hy, c.Z - hz),
+                    Max = new XYZ(c.X + hx, c.Y + hy, c.Z + hz)
+                };
+            }
+
+            bool BBoxIntersect(BoundingBoxXYZ a, BoundingBoxXYZ b)
+            {
+                if (a == null || b == null) return false;
+                return a.Min.X <= b.Max.X && a.Max.X >= b.Min.X
+                    && a.Min.Y <= b.Max.Y && a.Max.Y >= b.Min.Y
+                    && a.Min.Z <= b.Max.Z && a.Max.Z >= b.Min.Z;
+            }
+
+            bool PointInRect2D(XYZ p, double minX, double maxX, double minZ, double maxZ) =>
+                p.X >= minX && p.X <= maxX && p.Z >= minZ && p.Z <= maxZ;
+
+            double Cross2D(XYZ a, XYZ b, XYZ c)
+            {
+                double abx = b.X - a.X;
+                double abz = b.Z - a.Z;
+                double acx = c.X - a.X;
+                double acz = c.Z - a.Z;
+                return abx * acz - abz * acx;
+            }
+
+            bool SegmentsIntersect2D(XYZ a, XYZ b, XYZ c, XYZ d)
+            {
+                const double E = 1e-9;
+
+                double d1 = Cross2D(a, b, c);
+                double d2 = Cross2D(a, b, d);
+                double d3 = Cross2D(c, d, a);
+                double d4 = Cross2D(c, d, b);
+
+                bool Proper = ((d1 > E && d2 < -E) || (d1 < -E && d2 > E)) &&
+                              ((d3 > E && d4 < -E) || (d3 < -E && d4 > E));
+
+                if (Proper) return true;
+
+                bool OnSeg(XYZ p, XYZ q, XYZ r)
+                {
+                    return q.X >= Math.Min(p.X, r.X) - E && q.X <= Math.Max(p.X, r.X) + E &&
+                           q.Z >= Math.Min(p.Z, r.Z) - E && q.Z <= Math.Max(p.Z, r.Z) + E;
+                }
+
+                bool Collinear(double val) => Math.Abs(val) <= E;
+
+                if (Collinear(d1) && OnSeg(a, c, b)) return true;
+                if (Collinear(d2) && OnSeg(a, d, b)) return true;
+                if (Collinear(d3) && OnSeg(c, a, d)) return true;
+                if (Collinear(d4) && OnSeg(c, b, d)) return true;
+
+                return false;
+            }
+
+            bool SegmentIntersectsRect2D(XYZ p1, XYZ p2, BoundingBoxXYZ panelBox)
+            {
+                if (panelBox == null) return false;
+
+                double minX = Math.Min(panelBox.Min.X, panelBox.Max.X);
+                double maxX = Math.Max(panelBox.Min.X, panelBox.Max.X);
+                double minZ = Math.Min(panelBox.Min.Z, panelBox.Max.Z);
+                double maxZ = Math.Max(panelBox.Min.Z, panelBox.Max.Z);
+
+                if (PointInRect2D(p1, minX, maxX, minZ, maxZ)) return true;
+                if (PointInRect2D(p2, minX, maxX, minZ, maxZ)) return true;
+
+                var r1 = new XYZ(minX, 0, minZ);
+                var r2 = new XYZ(maxX, 0, minZ);
+                var r3 = new XYZ(maxX, 0, maxZ);
+                var r4 = new XYZ(minX, 0, maxZ);
+
+                if (SegmentsIntersect2D(p1, p2, r1, r2)) return true;
+                if (SegmentsIntersect2D(p1, p2, r2, r3)) return true;
+                if (SegmentsIntersect2D(p1, p2, r3, r4)) return true;
+                if (SegmentsIntersect2D(p1, p2, r4, r1)) return true;
+
+                return false;
+            }
+
+            List<FamilyInstance> GetHitPanelsBySegment2D(List<(FamilyInstance fi, BoundingBoxXYZ bbox)> panels, XYZ s1, XYZ s2)
+            {
+                var res = new List<FamilyInstance>();
+                foreach (var p in panels)
+                {
+                    if (SegmentIntersectsRect2D(s1, s2, p.bbox))
+                        res.Add(p.fi);
+                }
+                return res;
+            }
+
+            // --- метрики ---
+            int wallsProcessed = 0;
+            int openingsProcessed = 0;
+            int cutoutPanelsFound = 0;
+            int cutoutPanelsUpdated = 0;
+            int paramsSet = 0;
+
+            using (var t = new Transaction(_doc, "CW: Set cutout panel cuts by regular panel values"))
+            {
+                t.Start();
+
+                // bbox/параметры после предыдущих операций должны быть актуализированы
+                _doc.Regenerate();
+
+                foreach (var cw in data)
+                {
+                    if (cw?.CurtainWallElement == null)
+                        continue;
+
+                    wallsProcessed++;
+
+                    int wallId = cw.CurtainWallElement.Id.IntegerValue;
+                    var openings = cw.IntersectingOpenings ?? new List<OpeningModelDto>();
+                    var panelsAll = cw.Panels ?? new List<CurtainWallPanelDto>();
+
+                    if (openings.Count == 0 || panelsAll.Count == 0)
+                        continue;
+
+                    // Разделяем панели по типам (по Symbol.Family.Name)
+                    var regularPanels = panelsAll
+                        .Where(p => p?.PanelElement != null)
+                        .Where(p => p.PanelElement.Symbol?.Family?.Name == REGULAR_FAMILY)
+                        .ToList();
+
+                    var cutoutPanels = panelsAll
+                        .Where(p => p?.PanelElement != null)
+                        .Where(p =>
+                        {
+                            var fam = p.PanelElement.Symbol?.Family?.Name ?? "";
+                            return fam == CUTOUT_TOP_FAMILY || fam == CUTOUT_BOTTOM_FAMILY;
+                        })
+                        .ToList();
+
+                    Debug.WriteLine($"{TAG} wallId={wallId}, openings={openings.Count}, regularPanels={regularPanels.Count}, cutoutPanels={cutoutPanels.Count}");
+
+                    if (regularPanels.Count == 0 || cutoutPanels.Count == 0)
+                        continue;
+
+                    foreach (var op in openings)
+                    {
+                        if (op?.OpeningElement == null)
+                            continue;
+
+                        var opBox = GetLocalBBoxFresh(op.OpeningElement, cw.InverseTransform);
+                        if (opBox == null)
+                        {
+                            Debug.WriteLine($"{TAG} wallId={wallId}: opening bbox null -> skip");
+                            continue;
+                        }
+
+                        openingsProcessed++;
+                        int opId = op.OpeningElement.Id.IntegerValue;
+                        var opC = CenterOf(opBox);
+
+                        Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId}, opLocalMin=({opBox.Min.X:F4},{opBox.Min.Y:F4},{opBox.Min.Z:F4}), opLocalMax=({opBox.Max.X:F4},{opBox.Max.Y:F4},{opBox.Max.Z:F4})");
+
+                        // 1) Находим лучшие рядовые панели по сторонам (L/R/T/B)
+                        FamilyInstance bestLeft = null, bestRight = null, bestTop = null, bestBottom = null;
+                        double bestLeftScore = 0, bestRightScore = 0, bestTopScore = 0, bestBottomScore = 0;
+
+                        foreach (var rp in regularPanels)
+                        {
+                            var fi = rp.PanelElement;
+                            if (fi == null) continue;
+
+                            var pBox = GetLocalBBoxFresh(fi, cw.InverseTransform);
+                            if (pBox == null) continue;
+
+                            if (!Intersects3D(opBox, pBox))
+                                continue;
+
+                            var pC = CenterOf(pBox);
+                            double dx = pC.X - opC.X;
+                            double dz = pC.Z - opC.Z;
+
+                            // определяем сторону как в RegularCuts
+                            if (Math.Abs(dz) >= Math.Abs(dx))
+                            {
+                                // Top/Bottom (по Z), score = overlapZ
+                                double score = OverlapZ(opBox, pBox);
+                                if (score <= EPS) continue;
+
+                                if (dz > 0)
+                                {
+                                    if (score > bestTopScore)
+                                    {
+                                        bestTopScore = score;
+                                        bestTop = fi;
+                                    }
+                                }
+                                else
+                                {
+                                    if (score > bestBottomScore)
+                                    {
+                                        bestBottomScore = score;
+                                        bestBottom = fi;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Left/Right (по X), score = overlapX
+                                double score = OverlapX(opBox, pBox);
+                                if (score <= EPS) continue;
+
+                                if (dx < 0)
+                                {
+                                    if (score > bestLeftScore)
+                                    {
+                                        bestLeftScore = score;
+                                        bestLeft = fi;
+                                    }
+                                }
+                                else
+                                {
+                                    if (score > bestRightScore)
+                                    {
+                                        bestRightScore = score;
+                                        bestRight = fi;
+                                    }
+                                }
+                            }
+                        }
+
+                        Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId} neighbors: " +
+                                        $"L={(bestLeft == null ? "null" : bestLeft.Id.IntegerValue.ToString())}, " +
+                                        $"R={(bestRight == null ? "null" : bestRight.Id.IntegerValue.ToString())}, " +
+                                        $"T={(bestTop == null ? "null" : bestTop.Id.IntegerValue.ToString())}, " +
+                                        $"B={(bestBottom == null ? "null" : bestBottom.Id.IntegerValue.ToString())}");
+
+                        // 2) Ищем угловые панели (TL/TR/BL/BR) по уже проверенной логике сегментов
+                        // Сначала кандидаты (уменьшенный bbox пересекается с bbox проёма)
+                        var candidateCutouts = new List<(FamilyInstance fi, BoundingBoxXYZ bbox)>();
+                        foreach (var cp in cutoutPanels)
+                        {
+                            var fi = cp.PanelElement;
+                            if (fi == null) continue;
+
+                            var pBox = GetLocalBBoxFresh(fi, cw.InverseTransform);
+                            if (pBox == null) continue;
+
+                            var reduced = Reduce(pBox, PANEL_BBOX_REDUCTION_FACTOR);
+                            if (BBoxIntersect(opBox, reduced))
+                                candidateCutouts.Add((fi, reduced));
+                        }
+
+                        Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId} candidateCutouts={candidateCutouts.Count}");
+
+                        if (candidateCutouts.Count == 0)
+                            continue;
+
+                        var windowCornerTL = new XYZ(opBox.Min.X, 0, opBox.Max.Z);
+                        var windowCornerTR = new XYZ(opBox.Max.X, 0, opBox.Max.Z);
+                        var windowCornerBL = new XYZ(opBox.Min.X, 0, opBox.Min.Z);
+                        var windowCornerBR = new XYZ(opBox.Max.X, 0, opBox.Min.Z);
+
+                        var corners = new List<(XYZ corner, XYZ dirV, XYZ dirH, string name)>
+                        {
+                            (windowCornerTL, new XYZ(0,0, 1), new XYZ(-1,0,0), "TL"),
+                            (windowCornerTR, new XYZ(0,0, 1), new XYZ( 1,0,0), "TR"),
+                            (windowCornerBL, new XYZ(0,0,-1), new XYZ(-1,0,0), "BL"),
+                            (windowCornerBR, new XYZ(0,0,-1), new XYZ( 1,0,0), "BR"),
+                        };
+
+                        // cornerName -> found cutout panel
+                        var foundCorners = new Dictionary<string, FamilyInstance>();
+
+                        foreach (var c in corners)
+                        {
+                            var p1v = c.corner;
+                            var p2v = c.corner + c.dirV * CHECK_SEGMENT_LENGTH_FT;
+
+                            var p1h = c.corner;
+                            var p2h = c.corner + c.dirH * CHECK_SEGMENT_LENGTH_FT;
+
+                            var hitV = GetHitPanelsBySegment2D(candidateCutouts, p1v, p2v);
+                            var hitH = GetHitPanelsBySegment2D(candidateCutouts, p1h, p2h);
+
+                            var common = hitV.Intersect(hitH).ToList();
+                            if (common.Count == 0)
+                                continue;
+
+                            // если несколько — берём ближайшую к углу по центру bbox
+                            FamilyInstance best = null;
+                            double bestDist = double.MaxValue;
+
+                            foreach (var fi in common)
+                            {
+                                var bb = GetLocalBBoxFresh(fi, cw.InverseTransform);
+                                if (bb == null) continue;
+
+                                var pc = GetCenter(bb);
+                                double dx = pc.X - c.corner.X;
+                                double dz = pc.Z - c.corner.Z;
+                                double d2 = dx * dx + dz * dz;
+
+                                if (d2 < bestDist)
+                                {
+                                    bestDist = d2;
+                                    best = fi;
+                                }
+                            }
+
+                            if (best != null)
+                            {
+                                foundCorners[c.name] = best;
+                                Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId} corner={c.name} cutoutPanelId={best.Id.IntegerValue}");
+                            }
+                        }
+
+                        if (foundCorners.Count == 0)
+                        {
+                            Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId} cornerPanelsFound=0");
+                            continue;
+                        }
+
+                        cutoutPanelsFound += foundCorners.Count;
+
+                        // 3) Применяем значения от рядовых к угловым
+                        void ApplyCorner(string cornerName, FamilyInstance cutoutFi, FamilyInstance leftFi, FamilyInstance rightFi, FamilyInstance topFi, FamilyInstance bottomFi)
+                        {
+                            if (cutoutFi == null) return;
+
+                            bool isTopCorner = cornerName == "TL" || cornerName == "TR";
+                            bool isLeftCorner = cornerName == "TL" || cornerName == "BL";
+
+                            var widthSource = isLeftCorner ? leftFi : rightFi;
+                            var heightSource = isTopCorner ? topFi : bottomFi;
+
+                            if (widthSource == null || heightSource == null)
+                            {
+                                Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId}, corner={cornerName} skip: widthSource or heightSource is null");
+                                return;
+                            }
+
+                            if (!TryGetDoubleParam(widthSource, REG_PARAM_HOR, out double widthFt) || widthFt <= EPS)
+                            {
+                                Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId}, corner={cornerName} skip: cannot read/invalid width from panelId={widthSource.Id.IntegerValue}");
+                                return;
+                            }
+
+                            string heightParam = isTopCorner ? REG_PARAM_TOP_HEIGHT : REG_PARAM_BOTTOM_HEIGHT;
+                            if (!TryGetDoubleParam(heightSource, heightParam, out double heightFt) || heightFt <= EPS)
+                            {
+                                Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId}, corner={cornerName} skip: cannot read/invalid height from panelId={heightSource.Id.IntegerValue}, param={heightParam}");
+                                return;
+                            }
+
+                            bool setW = TrySetParam(cutoutFi, CUT_PARAM_W, widthFt);
+                            bool setH = TrySetParam(cutoutFi, CUT_PARAM_H, heightFt);
+
+                            Debug.WriteLine($"{TAG} wallId={wallId}, openingId={opId}, corner={cornerName}, cutoutId={cutoutFi.Id.IntegerValue} " +
+                                            $"set({CUT_PARAM_W}={setW} {widthFt:F6}ft/{widthFt * FEET_TO_MM:F1}mm, {CUT_PARAM_H}={setH} {heightFt:F6}ft/{heightFt * FEET_TO_MM:F1}mm)");
+
+                            if (setW) paramsSet++;
+                            if (setH) paramsSet++;
+
+                            if (setW || setH)
+                                cutoutPanelsUpdated++;
+                        }
+
+                        foreach (var kv in foundCorners)
+                        {
+                            ApplyCorner(kv.Key, kv.Value, bestLeft, bestRight, bestTop, bestBottom);
+                        }
+                    }
+                }
+
+                _doc.Regenerate();
+                t.Commit();
+            }
+
+            Debug.WriteLine($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, cutoutPanelsFound={cutoutPanelsFound}, cutoutPanelsUpdated={cutoutPanelsUpdated}, paramsSet={paramsSet}");
         }
 
         private void ReplaceRegularPanelsWithCutoutPanels(List<CurtainWallDataDto> data)
         {
-            const string TAG = "[ReplaceRegularPanelsWithCutoutPanels]";
+            const string REGULAR_FAMILY = "КРСТ_НВФ_Рядовая_В3";
             const string CUTOUT_TOP_FAMILY = "КРСТ_НВФ_С Г-образным вырезом_В2";
             const string CUTOUT_BOTTOM_FAMILY = "КРСТ_НВФ_С L-образным вырезом";
 
-            const double CHECK_SEGMENT_LENGTH_FT = 0.328084;  // 100 мм в футах
-            const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;  // как в референсе
+            const double CHECK_SEGMENT_LENGTH_FT = 0.328084;           // 100 мм в футах
+            const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;           // как в референсе
 
-            Log($"{TAG} START");
+            Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] START");
 
             if (data == null || data.Count == 0)
             {
-                Log($"{TAG} data is null/empty -> skip");
+                Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
                 return;
+            }
+
+            XYZ GetCenter(BoundingBoxXYZ b) =>
+                new XYZ((b.Min.X + b.Max.X) * 0.5, (b.Min.Y + b.Max.Y) * 0.5, (b.Min.Z + b.Max.Z) * 0.5);
+
+            BoundingBoxXYZ Reduce(BoundingBoxXYZ b, double factor)
+            {
+                var c = GetCenter(b);
+                double hx = (b.Max.X - b.Min.X) * 0.5 * factor;
+                double hy = (b.Max.Y - b.Min.Y) * 0.5 * factor;
+                double hz = (b.Max.Z - b.Min.Z) * 0.5 * factor;
+
+                return new BoundingBoxXYZ
+                {
+                    Min = new XYZ(c.X - hx, c.Y - hy, c.Z - hz),
+                    Max = new XYZ(c.X + hx, c.Y + hy, c.Z + hz)
+                };
+            }
+
+            bool BBoxIntersect(BoundingBoxXYZ a, BoundingBoxXYZ b)
+            {
+                if (a == null || b == null) return false;
+                return a.Min.X <= b.Max.X && a.Max.X >= b.Min.X
+                    && a.Min.Y <= b.Max.Y && a.Max.Y >= b.Min.Y
+                    && a.Min.Z <= b.Max.Z && a.Max.Z >= b.Min.Z;
+            }
+
+            bool PointInRect2D(XYZ p, double minX, double maxX, double minZ, double maxZ) =>
+                p.X >= minX && p.X <= maxX && p.Z >= minZ && p.Z <= maxZ;
+
+            double Cross2D(XYZ a, XYZ b, XYZ c)
+            {
+                double abx = b.X - a.X;
+                double abz = b.Z - a.Z;
+                double acx = c.X - a.X;
+                double acz = c.Z - a.Z;
+                return abx * acz - abz * acx;
+            }
+
+            bool SegmentsIntersect2D(XYZ a, XYZ b, XYZ c, XYZ d)
+            {
+                const double E = 1e-9;
+
+                double d1 = Cross2D(a, b, c);
+                double d2 = Cross2D(a, b, d);
+                double d3 = Cross2D(c, d, a);
+                double d4 = Cross2D(c, d, b);
+
+                bool Proper = ((d1 > E && d2 < -E) || (d1 < -E && d2 > E)) &&
+                              ((d3 > E && d4 < -E) || (d3 < -E && d4 > E));
+
+                if (Proper) return true;
+
+                bool OnSeg(XYZ p, XYZ q, XYZ r)
+                {
+                    return q.X >= Math.Min(p.X, r.X) - E && q.X <= Math.Max(p.X, r.X) + E &&
+                           q.Z >= Math.Min(p.Z, r.Z) - E && q.Z <= Math.Max(p.Z, r.Z) + E;
+                }
+
+                bool Collinear(double val) => Math.Abs(val) <= E;
+
+                if (Collinear(d1) && OnSeg(a, c, b)) return true;
+                if (Collinear(d2) && OnSeg(a, d, b)) return true;
+                if (Collinear(d3) && OnSeg(c, a, d)) return true;
+                if (Collinear(d4) && OnSeg(c, b, d)) return true;
+
+                return false;
+            }
+
+            bool SegmentIntersectsRect2D(XYZ p1, XYZ p2, BoundingBoxXYZ panelBox)
+            {
+                if (panelBox == null) return false;
+
+                double minX = Math.Min(panelBox.Min.X, panelBox.Max.X);
+                double maxX = Math.Max(panelBox.Min.X, panelBox.Max.X);
+                double minZ = Math.Min(panelBox.Min.Z, panelBox.Max.Z);
+                double maxZ = Math.Max(panelBox.Min.Z, panelBox.Max.Z);
+
+                if (PointInRect2D(p1, minX, maxX, minZ, maxZ)) return true;
+                if (PointInRect2D(p2, minX, maxX, minZ, maxZ)) return true;
+
+                var r1 = new XYZ(minX, 0, minZ);
+                var r2 = new XYZ(maxX, 0, minZ);
+                var r3 = new XYZ(maxX, 0, maxZ);
+                var r4 = new XYZ(minX, 0, maxZ);
+
+                if (SegmentsIntersect2D(p1, p2, r1, r2)) return true;
+                if (SegmentsIntersect2D(p1, p2, r2, r3)) return true;
+                if (SegmentsIntersect2D(p1, p2, r3, r4)) return true;
+                if (SegmentsIntersect2D(p1, p2, r4, r1)) return true;
+
+                return false;
+            }
+
+            List<FamilyInstance> GetHitPanelsBySegment2D(List<(FamilyInstance fi, BoundingBoxXYZ bbox)> panels, XYZ s1, XYZ s2)
+            {
+                var res = new List<FamilyInstance>();
+                foreach (var p in panels)
+                {
+                    if (SegmentIntersectsRect2D(s1, s2, p.bbox))
+                        res.Add(p.fi);
+                }
+                return res;
             }
 
             var topSymbol = GetFamilySymbolByName(CUTOUT_TOP_FAMILY);
@@ -114,7 +630,8 @@ namespace CWPanelsCustomizer
 
             if (topSymbol == null || bottomSymbol == null)
             {
-                Log($"{TAG} ERROR: target symbols not found. Top='{CUTOUT_TOP_FAMILY}' null={topSymbol == null}, Bottom='{CUTOUT_BOTTOM_FAMILY}' null={bottomSymbol == null}");
+                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found. " +
+                                $"Top='{CUTOUT_TOP_FAMILY}' null={topSymbol == null}, Bottom='{CUTOUT_BOTTOM_FAMILY}' null={bottomSymbol == null}");
                 TaskDialog.Show("Ошибка", "Не найдены семейства для замены угловых панелей (проверь имена семейств в проекте).");
                 return;
             }
@@ -143,10 +660,10 @@ namespace CWPanelsCustomizer
 
                     var regularPanels = panels
                         .Where(p => p?.PanelElement != null)
-                        .Where(p => p.PanelElement.Symbol?.Family?.Name?.Contains(REGULAR_PANEL_FAMILY) == true)
+                        .Where(p => p.PanelElement.Symbol?.Family?.Name?.Contains(REGULAR_FAMILY) == true)
                         .ToList();
 
-                    Log($"{TAG} wallId={wallId.IntegerValue} openings={openings.Count}, regularPanels={regularPanels.Count}");
+                    Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openings={openings.Count}, regularPanels={regularPanels.Count}");
 
                     if (openings.Count == 0 || regularPanels.Count == 0)
                         continue;
@@ -162,32 +679,31 @@ namespace CWPanelsCustomizer
 
                         openingsProcessed++;
 
-                        Log($"{TAG} wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} opLocalMin=({ob.Min.X:F4},{ob.Min.Y:F4},{ob.Min.Z:F4}) opLocalMax=({ob.Max.X:F4},{ob.Max.Y:F4},{ob.Max.Z:F4})");
+                        Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} " +
+                                        $"opLocalMin=({ob.Min.X:F4},{ob.Min.Y:F4},{ob.Min.Z:F4}) opLocalMax=({ob.Max.X:F4},{ob.Max.Y:F4},{ob.Max.Z:F4})");
 
-                        // ШАГ 1: кандидаты по пересечению bbox (в ЛСК) + редукция bbox панели
                         var candidate = new List<(FamilyInstance fi, BoundingBoxXYZ bbox)>();
                         foreach (var p in regularPanels)
                         {
                             var pb = p.LocalBoundingBox;
                             if (pb == null) continue;
 
-                            var reduced = ReduceBoundingBoxAroundCenter(pb, PANEL_BBOX_REDUCTION_FACTOR);
-                            if (BoundingBoxesIntersectLocal(ob, reduced))
+                            var reduced = Reduce(pb, PANEL_BBOX_REDUCTION_FACTOR);
+                            if (BBoxIntersect(ob, reduced))
                                 candidate.Add((p.PanelElement, reduced));
                         }
 
-                        Log($"{TAG} wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} candidatePanels={candidate.Count}");
+                        Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} candidatePanels={candidate.Count}");
 
                         if (candidate.Count == 0)
                             continue;
 
-                        // ШАГ 2: углы окна в плоскости XZ ЛСК (Y не важен)
                         var windowCornerTL = new XYZ(ob.Min.X, 0, ob.Max.Z);
                         var windowCornerTR = new XYZ(ob.Max.X, 0, ob.Max.Z);
                         var windowCornerBL = new XYZ(ob.Min.X, 0, ob.Min.Z);
                         var windowCornerBR = new XYZ(ob.Max.X, 0, ob.Min.Z);
 
-                        var corners = new (XYZ corner, XYZ dirV, XYZ dirH, string name)[]
+                        var corners = new List<(XYZ corner, XYZ dirV, XYZ dirH, string name)>
                         {
                             (windowCornerTL, new XYZ(0,0, 1), new XYZ(-1,0,0), "TL"),
                             (windowCornerTR, new XYZ(0,0, 1), new XYZ( 1,0,0), "TR"),
@@ -199,30 +715,31 @@ namespace CWPanelsCustomizer
 
                         foreach (var c in corners)
                         {
-                            XYZ p1v = c.corner;
-                            XYZ p2v = c.corner + c.dirV * CHECK_SEGMENT_LENGTH_FT;
+                            var p1v = c.corner;
+                            var p2v = c.corner + c.dirV * CHECK_SEGMENT_LENGTH_FT;
 
-                            XYZ p1h = c.corner;
-                            XYZ p2h = c.corner + c.dirH * CHECK_SEGMENT_LENGTH_FT;
+                            var p1h = c.corner;
+                            var p2h = c.corner + c.dirH * CHECK_SEGMENT_LENGTH_FT;
 
                             var hitV = GetHitPanelsBySegment2D(candidate, p1v, p2v);
                             var hitH = GetHitPanelsBySegment2D(candidate, p1h, p2h);
 
                             var common = hitV.Intersect(hitH).ToList();
-                            if (common.Count == 0) continue;
+                            if (common.Count == 0)
+                                continue;
 
                             foreach (var fi in common)
                                 panelsToReplace.Add(fi);
 
-                            Log($"{TAG} wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} corner={c.name} commonPanels={common.Count}");
+                            Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} " +
+                                            $"corner={c.name} commonPanels={common.Count}");
                         }
 
-                        Log($"{TAG} wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} cornerPanelsFound={panelsToReplace.Count}");
+                        Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} cornerPanelsFound={panelsToReplace.Count}");
 
                         if (panelsToReplace.Count == 0)
                             continue;
 
-                        // ШАГ 3: верх/низ по Z центров (в ЛСК)
                         var windowCenter = GetCenter(ob);
 
                         foreach (var panelFi in panelsToReplace)
@@ -253,11 +770,12 @@ namespace CWPanelsCustomizer
                                 replaced++;
                                 alreadyReplaced.Add(panelFi.Id);
 
-                                Log($"{TAG} wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} panelId={panelFi.Id.IntegerValue} replaced -> {targetName}");
+                                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId.IntegerValue} openingId={opening.Id.IntegerValue} " +
+                                                $"panelId={panelFi.Id.IntegerValue} replaced -> {targetName}");
                             }
                             catch (Exception ex)
                             {
-                                Log($"{TAG} panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
+                                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
                             }
                         }
                     }
@@ -266,17 +784,18 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Log($"{TAG} END openingsProcessed={openingsProcessed}, panelsToReplaceTotal={panelsToReplaceTotal}, replaced={replaced}");
+            Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, panelsToReplaceTotal={panelsToReplaceTotal}, replaced={replaced}");
         }
 
         private void ResetRegularPanelsCutsForIntersectingOpenings(List<CurtainWallDataDto> data)
         {
             const string TAG = "[ResetRegularPanelsCutsForIntersectingOpenings]";
-            Log($"{TAG} START");
+            const string REGULAR_PANEL_FAMILY = "КРСТ_НВФ_Рядовая_В3";
+            Debug.WriteLine($"{TAG} START");
 
             if (data == null || data.Count == 0)
             {
-                Log($"{TAG} data is null/empty -> END");
+                Debug.WriteLine($"{TAG} data is null/empty -> END");
                 return;
             }
 
@@ -293,7 +812,7 @@ namespace CWPanelsCustomizer
 
                     foreach (var wallDto in data)
                     {
-                        if (wallDto?.CurtainWallElement == null)
+                        if (wallDto == null || wallDto.CurtainWallElement == null)
                             continue;
 
                         wallsProcessed++;
@@ -301,14 +820,14 @@ namespace CWPanelsCustomizer
                         var openings = wallDto.IntersectingOpenings ?? new List<OpeningModelDto>();
                         var panels = wallDto.Panels ?? new List<CurtainWallPanelDto>();
 
-                        Log($"{TAG} wallId={wallDto.Id?.IntegerValue}, openings={openings.Count}, panels={panels.Count}");
+                        Debug.WriteLine($"{TAG} wallId={wallDto.Id?.IntegerValue}, openings={openings.Count}, panels={panels.Count}");
 
                         if (openings.Count == 0 || panels.Count == 0)
                             continue;
 
                         foreach (var opening in openings)
                         {
-                            if (opening?.OpeningElement == null)
+                            if (opening == null || opening.OpeningElement == null)
                                 continue;
 
                             openingsProcessed++;
@@ -316,34 +835,47 @@ namespace CWPanelsCustomizer
                             var opLocal = opening.LocalBoundingBox;
                             if (opLocal == null)
                             {
-                                Log($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue} opLocal=null skip");
+                                Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue} opLocal=null skip");
                                 continue;
                             }
 
-                            Log($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, opLocalMin=({opLocal.Min.X:F4},{opLocal.Min.Y:F4},{opLocal.Min.Z:F4}), opLocalMax=({opLocal.Max.X:F4},{opLocal.Max.Y:F4},{opLocal.Max.Z:F4})");
+                            Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, opLocalMin=({opLocal.Min.X:F4},{opLocal.Min.Y:F4},{opLocal.Min.Z:F4}), opLocalMax=({opLocal.Max.X:F4},{opLocal.Max.Y:F4},{opLocal.Max.Z:F4})");
 
-                            var intersectingPanels = panels
-                                .Where(p => p?.PanelElement != null)
-                                .Where(p => (p.PanelElement.Symbol?.Family?.Name ?? "").Contains(REGULAR_PANEL_FAMILY))
-                                .Where(p => p.LocalBoundingBox != null && BoundingBoxesIntersectLocal(opLocal, p.LocalBoundingBox))
-                                .ToList();
+                            var intersectingPanels = new List<CurtainWallPanelDto>();
 
-                            Log($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, intersectingRegularPanels={intersectingPanels.Count}");
+                            foreach (var p in panels)
+                            {
+                                if (p == null || p.PanelElement == null)
+                                    continue;
+
+                                var fam = p.PanelElement.Symbol?.Family?.Name ?? "";
+                                if (!fam.Contains(REGULAR_PANEL_FAMILY))
+                                    continue;
+
+                                var pLocal = p.LocalBoundingBox;
+                                if (pLocal == null)
+                                    continue;
+
+                                if (Intersects3D(opLocal, pLocal))
+                                    intersectingPanels.Add(p);
+                            }
+
+                            Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, intersectingRegularPanels={intersectingPanels.Count}");
 
                             foreach (var p in intersectingPanels)
                             {
                                 var fi = p.PanelElement;
 
-                                bool set1 = TrySetDouble(fi, "Подрезка", 0.0, TAG);
-                                bool set2 = TrySetDouble(fi, "Подрезка_Верх", 0.0, TAG);
-                                bool set3 = TrySetDouble(fi, "Подрезка_Низ", 0.0, TAG);
+                                bool set1 = TrySetDouble(fi, "Подрезка", 0.0);
+                                bool set2 = TrySetDouble(fi, "Подрезка_Верх", 0.0);
+                                bool set3 = TrySetDouble(fi, "Подрезка_Низ", 0.0);
 
                                 panelsTouched++;
                                 if (set1) paramsSet++;
                                 if (set2) paramsSet++;
                                 if (set3) paramsSet++;
 
-                                Log($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, panelId={fi.Id.IntegerValue}, reset(Подрезка={set1}, Подрезка_Верх={set2}, Подрезка_Низ={set3})");
+                                Debug.WriteLine($"{TAG} wallId={wallDto.Id.IntegerValue}, openingId={opening.Id.IntegerValue}, panelId={fi.Id.IntegerValue}, reset(Подрезка={set1}, Подрезка_Верх={set2}, Подрезка_Низ={set3})");
                             }
                         }
                     }
@@ -351,28 +883,48 @@ namespace CWPanelsCustomizer
                     t.Commit();
                 }
 
-                Log($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, panelsTouched={panelsTouched}, paramsSet={paramsSet}");
+                Debug.WriteLine($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, panelsTouched={panelsTouched}, paramsSet={paramsSet}");
             }
             catch (Exception ex)
             {
-                Log($"{TAG} ERROR: {ex}");
-                TaskDialog.Show(nameof(ResetRegularPanelsCutsForIntersectingOpenings), ex.Message);
+                Debug.WriteLine($"{TAG} ERROR: {ex}");
+                TaskDialog.Show("ResetRegularPanelsCutsForIntersectingOpenings", ex.Message);
+            }
+
+            bool TrySetDouble(FamilyInstance fi, string paramName, double value)
+            {
+                try
+                {
+                    var p = fi.LookupParameter(paramName);
+                    if (p == null)
+                    {
+                        Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} param '{paramName}' not found");
+                        return false;
+                    }
+                    if (p.IsReadOnly)
+                    {
+                        Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} param '{paramName}' is read-only");
+                        return false;
+                    }
+                    p.Set(value);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} set '{paramName}' failed: {ex.Message}");
+                    return false;
+                }
             }
         }
 
         private void CalculateAndSetRegularPanelsCuts(List<CurtainWallDataDto> data)
         {
-            const string TAG = "[CalculateAndSetRegularPanelsCuts]";
-            Log($"{TAG} START");
-
+            Debug.WriteLine("[CalculateAndSetRegularPanelsCuts] START");
             if (data == null || data.Count == 0)
             {
-                Log($"{TAG} data is null/empty -> END");
+                Debug.WriteLine("[CalculateAndSetRegularPanelsCuts] data is null/empty -> END");
                 return;
             }
-
-            const double EPS = 1e-9;
-            const double FEET_TO_MM = 304.8;
 
             // === Adjustments (mm) ===
             const double DELTA_MM = -43.0;
@@ -385,82 +937,83 @@ namespace CWPanelsCustomizer
             int totalParamsSet = 0;
             int totalOpeningsProcessed = 0;
 
-            using (var t = new Transaction(_doc, "CW: Set regular panel cuts by openings (local bbox)"))
+            using (Transaction t = new Transaction(_doc, "CW: Set regular panel cuts by openings (local bbox)"))
             {
                 t.Start();
 
-                // ВАЖНО: regenerate внутри Transaction (валидно и нужно после замены символов)
+                // ВАЖНО: Regenerate внутри Transaction (тут это валидно)
                 _doc.Regenerate();
 
                 foreach (var cw in data)
                 {
-                    if (cw?.CurtainWallElement == null)
+                    if (cw == null || cw.CurtainWallElement == null)
                     {
-                        Log($"{TAG} skip: null cw or wall");
+                        Debug.WriteLine("[CalculateAndSetRegularPanelsCuts] skip: null cw or wall");
                         continue;
                     }
 
-                    int wallId = cw.CurtainWallElement.Id.IntegerValue;
+                    var wallId = cw.CurtainWallElement.Id.IntegerValue;
                     var openings = cw.IntersectingOpenings ?? new List<OpeningModelDto>();
                     var panelsAll = cw.Panels ?? new List<CurtainWallPanelDto>();
 
                     var regularPanels = panelsAll
-                        .Where(p => p?.PanelElement != null)
-                        .Where(p => p.PanelElement.Symbol?.Family?.Name == REGULAR_PANEL_FAMILY)
+                        .Where(p => p != null && p.PanelElement != null && p.PanelElement.Symbol != null && p.PanelElement.Symbol.Family != null)
+                        .Where(p => p.PanelElement.Symbol.Family.Name == "КРСТ_НВФ_Рядовая_В3")
                         .ToList();
 
-                    Log($"{TAG} wallId={wallId}, openings={openings.Count}, regularPanels={regularPanels.Count}");
+                    Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openings={openings.Count}, regularPanels={regularPanels.Count}");
 
                     if (openings.Count == 0 || regularPanels.Count == 0)
                         continue;
 
                     foreach (var op in openings)
                     {
-                        if (op?.OpeningElement == null)
+                        if (op == null || op.OpeningElement == null)
                         {
-                            Log($"{TAG} wallId={wallId}: skip opening null");
+                            Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}: skip opening null");
                             continue;
                         }
 
                         var opBox = GetLocalBBoxFresh(op.OpeningElement, cw.InverseTransform);
                         if (opBox == null)
                         {
-                            Log($"{TAG} wallId={wallId}: skip opening bbox null");
+                            Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}: skip opening bbox null");
                             continue;
                         }
 
                         totalOpeningsProcessed++;
-                        int opId = op.OpeningElement.Id.IntegerValue;
-                        var opC = GetCenter(opBox);
+                        var opId = op.OpeningElement.Id.IntegerValue;
+                        var opC = CenterOf(opBox);
 
-                        Log($"{TAG} wallId={wallId}, openingId={opId}, opLocalMin=({opBox.Min.X:F4},{opBox.Min.Y:F4},{opBox.Min.Z:F4}), opLocalMax=({opBox.Max.X:F4},{opBox.Max.Y:F4},{opBox.Max.Z:F4})");
+                        Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}, opLocalMin=({opBox.Min.X:F4},{opBox.Min.Y:F4},{opBox.Min.Z:F4}), opLocalMax=({opBox.Max.X:F4},{opBox.Max.Y:F4},{opBox.Max.Z:F4})");
 
-                        // ВАЖНО: берём свежие bbox панелей после Replace + Regenerate
-                        var candidatePanels = new List<(FamilyInstance panel, BoundingBoxXYZ freshBox)>();
+                        var candidatePanels = new List<(CurtainWallPanelDto dto, BoundingBoxXYZ freshBox)>();
                         foreach (var p in regularPanels)
                         {
                             var fresh = GetLocalBBoxFresh(p.PanelElement, cw.InverseTransform);
                             if (fresh == null) continue;
 
-                            if (BoundingBoxesIntersectLocal(opBox, fresh))
-                                candidatePanels.Add((p.PanelElement, fresh));
+                            if (Intersects3D(opBox, fresh))
+                                candidatePanels.Add((p, fresh));
                         }
 
-                        Log($"{TAG} wallId={wallId}, openingId={opId}, candidatePanels={candidatePanels.Count}");
+                        Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}, candidatePanels={candidatePanels.Count}");
 
                         if (candidatePanels.Count == 0)
                             continue;
 
-                        int touchedThisOpening = 0;
-                        int setThisOpening = 0;
+                        int panelsTouchedThisOpening = 0;
+                        int paramsSetThisOpening = 0;
 
                         foreach (var item in candidatePanels)
                         {
-                            var panel = item.panel;
-                            int pId = panel.Id.IntegerValue;
-                            var pBox = item.freshBox;
+                            var panel = item.dto.PanelElement;
+                            var pId = panel.Id.IntegerValue;
 
-                            var pC = GetCenter(pBox);
+                            var pBox = item.freshBox;
+                            if (pBox == null) continue;
+
+                            var pC = CenterOf(pBox);
                             double dx = pC.X - opC.X;
                             double dz = pC.Z - opC.Z;
 
@@ -471,58 +1024,58 @@ namespace CWPanelsCustomizer
 
                             if (Math.Abs(dz) >= Math.Abs(dx))
                             {
-                                // vertical (Top/Bottom)
-                                baseValueFt = OverlapZ(opBox, pBox, EPS);
                                 if (dz > 0)
                                 {
                                     side = "Top";
                                     paramName = "Подрезка_Низ";
+                                    baseValueFt = OverlapZ(opBox, pBox);
                                     adjustedValueFt = baseValueFt + MmToFt(VERTICAL_MM + DELTA_MM);
                                 }
                                 else
                                 {
                                     side = "Bottom";
                                     paramName = "Подрезка_Верх";
+                                    baseValueFt = OverlapZ(opBox, pBox);
                                     adjustedValueFt = baseValueFt - MmToFt(VERTICAL_MM) + MmToFt(DELTA_MM);
                                 }
                             }
                             else
                             {
-                                // horizontal (Left/Right)
                                 side = dx < 0 ? "Left" : "Right";
                                 paramName = "Подрезка";
-                                baseValueFt = OverlapX(opBox, pBox, EPS);
+                                baseValueFt = OverlapX(opBox, pBox);
                                 adjustedValueFt = baseValueFt - MmToFt(HORIZONTAL_MM) + MmToFt(DELTA_MM);
                             }
 
                             if (baseValueFt <= EPS)
                             {
-                                Log($"{TAG} wallId={wallId}, openingId={opId}, panelId={pId}, side={side}: overlap=0 -> skip");
+                                Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}, panelId={pId}, side={side}: overlap=0 -> skip");
                                 continue;
                             }
 
                             if (adjustedValueFt <= EPS)
                             {
-                                Log($"{TAG} wallId={wallId}, openingId={opId}, panelId={pId}, side={side}: adjusted<=0 (baseFt={baseValueFt:F6}) -> skip");
+                                Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}, panelId={pId}, side={side}: adjusted<=0 (baseFt={baseValueFt:F6}) -> skip");
                                 continue;
                             }
 
                             bool setOk = TrySetParam(panel, paramName, adjustedValueFt);
 
-                            Log($"{TAG} wallId={wallId}, openingId={opId}, panelId={pId}, side={side}, param={paramName}, " +
+                            Debug.WriteLine(
+                                $"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}, panelId={pId}, side={side}, param={paramName}, " +
                                 $"baseFt={baseValueFt:F6} ({baseValueFt * FEET_TO_MM:F1}mm), adjFt={adjustedValueFt:F6} ({adjustedValueFt * FEET_TO_MM:F1}mm), set={setOk}");
 
                             if (setOk)
                             {
-                                touchedThisOpening++;
-                                setThisOpening++;
+                                panelsTouchedThisOpening++;
+                                paramsSetThisOpening++;
                             }
                         }
 
-                        totalPanelsTouched += touchedThisOpening;
-                        totalParamsSet += setThisOpening;
+                        totalPanelsTouched += panelsTouchedThisOpening;
+                        totalParamsSet += paramsSetThisOpening;
 
-                        Log($"{TAG} wallId={wallId}, openingId={opId}: touchedPanels={touchedThisOpening}, paramsSet={setThisOpening}");
+                        Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] wallId={wallId}, openingId={opId}: touchedPanels={panelsTouchedThisOpening}, paramsSet={paramsSetThisOpening}");
                     }
                 }
 
@@ -530,37 +1083,36 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Log($"{TAG} END: openingsProcessed={totalOpeningsProcessed}, panelsTouched={totalPanelsTouched}, paramsSet={totalParamsSet}");
+            Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] END: openingsProcessed={totalOpeningsProcessed}, panelsTouched={totalPanelsTouched}, paramsSet={totalParamsSet}");
         }
 
-        /// <summary>
-        /// Первый метод фасада: собирает витражи, проёмы и панели,
-        /// строит inverse transform витража и преобразует BBox в локальную СК витража.
-        /// Возвращает ТОЛЬКО витражи "в работе" (у которых есть пересекающиеся проёмы).
-        /// </summary>
         private List<CurtainWallDataDto> GetElements(Document doc)
         {
-            Log("[CWPanelsCustomizer] GetElements START");
+            Debug.WriteLine("[CWPanelsCustomizer] GetElements START");
 
-            var allCurtainWalls = new FilteredElementCollector(doc)
+            List<Wall> allCurtainWalls = new FilteredElementCollector(doc)
                 .OfClass(typeof(Wall))
                 .Cast<Wall>()
                 .Where(w => w != null && w.CurtainGrid != null)
                 .ToList();
 
-            Log($"[CWPanelsCustomizer] allCurtainWalls={allCurtainWalls.Count}");
+            Debug.WriteLine($"[CWPanelsCustomizer] allCurtainWalls={allCurtainWalls.Count}");
 
-            var allOpenings = new FilteredElementCollector(doc)
+            List<FamilyInstance> allOpenings = new FilteredElementCollector(doc)
                 .OfCategory(BuiltInCategory.OST_GenericModel)
                 .WhereElementIsNotElementType()
                 .OfType<FamilyInstance>()
-                .Where(fi => (fi.Symbol?.Family?.Name ?? "").Contains(OPENING_FAMILY_MARKER))
+                .Where(fi =>
+                    fi.Symbol != null &&
+                    fi.Symbol.Family != null &&
+                    fi.Symbol.Family.Name != null &&
+                    fi.Symbol.Family.Name.Contains("#_Оконный проем_Прямоугольный"))
                 .ToList();
 
-            Log($"[CWPanelsCustomizer] allOpenings={allOpenings.Count}");
+            Debug.WriteLine($"[CWPanelsCustomizer] allOpenings={allOpenings.Count}");
 
-            var curtainWallsData = new List<CurtainWallDataDto>();
-            var wallBboxesWorld = new Dictionary<ElementId, BoundingBoxXYZ>();
+            List<CurtainWallDataDto> curtainWallsData = new List<CurtainWallDataDto>();
+            Dictionary<ElementId, BoundingBoxXYZ> wallBboxesWorld = new Dictionary<ElementId, BoundingBoxXYZ>();
 
             foreach (Wall wall in allCurtainWalls)
             {
@@ -569,7 +1121,7 @@ namespace CWPanelsCustomizer
                 Transform wallTransform = GetWallTransform(wall);
                 Transform inverseTransform = wallTransform.Inverse;
 
-                var cwDto = new CurtainWallDataDto
+                CurtainWallDataDto cwDto = new CurtainWallDataDto
                 {
                     Id = wall.Id,
                     CurtainWallElement = wall,
@@ -579,16 +1131,15 @@ namespace CWPanelsCustomizer
                 curtainWallsData.Add(cwDto);
                 wallBboxesWorld[wall.Id] = wallBboxWorld;
 
-                Log($"[CWPanelsCustomizer] wall Id={wall.Id.IntegerValue} bboxWorld={(wallBboxWorld == null ? "null" : "ok")}");
+                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={wall.Id.IntegerValue} bboxWorld={(wallBboxWorld == null ? "null" : "ok")}");
             }
 
-            // Связь "проём -> витраж" по грубому пересечению BBox в мировой СК
             foreach (FamilyInstance opening in allOpenings)
             {
                 BoundingBoxXYZ openingBboxWorld = opening.get_BoundingBox(null);
                 if (openingBboxWorld == null)
                 {
-                    Log($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} bboxWorld=null skip");
+                    Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} bboxWorld=null skip");
                     continue;
                 }
 
@@ -599,7 +1150,7 @@ namespace CWPanelsCustomizer
                     if (!wallBboxesWorld.TryGetValue(cw.Id, out BoundingBoxXYZ wallBboxWorld) || wallBboxWorld == null)
                         continue;
 
-                    if (BoundingBoxesIntersectWorld(wallBboxWorld, openingBboxWorld))
+                    if (BoundingBoxesIntersect(wallBboxWorld, openingBboxWorld))
                     {
                         host = cw;
                         break;
@@ -608,7 +1159,7 @@ namespace CWPanelsCustomizer
 
                 if (host == null)
                 {
-                    Log($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} intersects no wall");
+                    Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} intersects no wall");
                     continue;
                 }
 
@@ -622,31 +1173,30 @@ namespace CWPanelsCustomizer
                     LocalBoundingBox = openingLocal
                 });
 
-                Log($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} assigned to wall Id={host.Id.IntegerValue}");
+                Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} assigned to wall Id={host.Id.IntegerValue}");
             }
 
-            // Панели витража + BBox world/local
             foreach (CurtainWallDataDto cw in curtainWallsData)
             {
                 CurtainGrid grid = cw.CurtainWallElement.CurtainGrid;
                 if (grid == null) continue;
 
                 ICollection<ElementId> panelIds = grid.GetPanelIds();
-                Log($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelIds={panelIds.Count}");
+                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelIds={panelIds.Count}");
 
                 foreach (ElementId pid in panelIds)
                 {
-                    var panelFi = doc.GetElement(pid) as FamilyInstance;
+                    FamilyInstance panelFi = doc.GetElement(pid) as FamilyInstance;
                     if (panelFi == null)
                     {
-                        Log($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} not FamilyInstance skip");
+                        Debug.WriteLine($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} not FamilyInstance skip");
                         continue;
                     }
 
                     BoundingBoxXYZ panelWorld = panelFi.get_BoundingBox(null);
                     if (panelWorld == null)
                     {
-                        Log($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} bboxWorld=null skip");
+                        Debug.WriteLine($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} bboxWorld=null skip");
                         continue;
                     }
 
@@ -661,13 +1211,13 @@ namespace CWPanelsCustomizer
                     });
                 }
 
-                Log($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelsFilled={cw.Panels.Count}");
+                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelsFilled={cw.Panels.Count}");
             }
 
-            var wallsInWork = curtainWallsData.Where(x => x.IntersectingOpenings.Any()).ToList();
-            Log($"[CWPanelsCustomizer] wallsInWork={wallsInWork.Count}");
+            List<CurtainWallDataDto> wallsInWork = curtainWallsData.Where(x => x.IntersectingOpenings.Any()).ToList();
+            Debug.WriteLine($"[CWPanelsCustomizer] wallsInWork={wallsInWork.Count}");
 
-            Log("[CWPanelsCustomizer] GetElements END");
+            Debug.WriteLine("[CWPanelsCustomizer] GetElements END");
             return wallsInWork;
         }
 
@@ -677,7 +1227,11 @@ namespace CWPanelsCustomizer
                 .OfCategory(BuiltInCategory.OST_GenericModel)
                 .WhereElementIsNotElementType()
                 .OfType<FamilyInstance>()
-                .Count(fi => (fi.Symbol?.Family?.Name ?? "").Contains(OPENING_FAMILY_MARKER));
+                .Count(fi =>
+                    fi.Symbol != null &&
+                    fi.Symbol.Family != null &&
+                    fi.Symbol.Family.Name != null &&
+                    fi.Symbol.Family.Name.Contains("#_Оконный проем_Прямоугольный"));
         }
 
         private int GetTotalCurtainWallsCount(Document doc)
@@ -688,26 +1242,22 @@ namespace CWPanelsCustomizer
                 .Count(w => w != null && w.CurtainGrid != null);
         }
 
-        /// <summary>
-        /// Локальная СК витража строится как в эталонном коде GetWallTransform.
-        /// В этом плагине linkModelTransf.HasReflection не учитываем (как false), т.к. работаем в активном документе.
-        /// </summary>
         private Transform GetWallTransform(Wall curWall)
         {
             Transform result = Transform.Identity;
             if (curWall == null) return result;
 
-            var lc = curWall.Location as LocationCurve;
+            LocationCurve lc = curWall.Location as LocationCurve;
             if (lc == null)
             {
-                Log($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} LocationCurve=null");
+                Debug.WriteLine($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} LocationCurve=null");
                 return result;
             }
 
-            var line = lc.Curve as Line;
+            Line line = lc.Curve as Line;
             if (line == null)
             {
-                Log($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} not Line");
+                Debug.WriteLine($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} not Line");
                 return result;
             }
 
@@ -738,99 +1288,22 @@ namespace CWPanelsCustomizer
                 transf.Origin = ptStart;
             }
 
-            Log($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} Origin=({transf.Origin.X:F3},{transf.Origin.Y:F3},{transf.Origin.Z:F3})");
+            Debug.WriteLine($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} Origin=({transf.Origin.X:F3},{transf.Origin.Y:F3},{transf.Origin.Z:F3})");
             return transf;
         }
 
-        // -------------------------
-        // Geometry / parameter utils
-        // -------------------------
-
-        private static void Log(string msg) => Debug.WriteLine(msg);
-
-        private static XYZ GetCenter(BoundingBoxXYZ b) =>
-            new XYZ((b.Min.X + b.Max.X) * 0.5, (b.Min.Y + b.Max.Y) * 0.5, (b.Min.Z + b.Max.Z) * 0.5);
-
-        private static bool BoundingBoxesIntersectWorld(BoundingBoxXYZ a, BoundingBoxXYZ b)
+        private bool BoundingBoxesIntersect(BoundingBoxXYZ a, BoundingBoxXYZ b)
         {
             if (a == null || b == null) return false;
-            return !(a.Max.X < b.Min.X || a.Min.X > b.Max.X ||
-                     a.Max.Y < b.Min.Y || a.Min.Y > b.Max.Y ||
-                     a.Max.Z < b.Min.Z || a.Min.Z > b.Max.Z);
+
+            bool no =
+                a.Max.X < b.Min.X || a.Min.X > b.Max.X ||
+                a.Max.Y < b.Min.Y || a.Min.Y > b.Max.Y ||
+                a.Max.Z < b.Min.Z || a.Min.Z > b.Max.Z;
+
+            return !no;
         }
 
-        private static bool BoundingBoxesIntersectLocal(BoundingBoxXYZ a, BoundingBoxXYZ b)
-        {
-            if (a == null || b == null) return false;
-            return !(a.Max.X < b.Min.X || a.Min.X > b.Max.X ||
-                     a.Max.Y < b.Min.Y || a.Min.Y > b.Max.Y ||
-                     a.Max.Z < b.Min.Z || a.Min.Z > b.Max.Z);
-        }
-
-        private static double OverlapX(BoundingBoxXYZ a, BoundingBoxXYZ b, double eps)
-        {
-            double min = Math.Max(a.Min.X, b.Min.X);
-            double max = Math.Min(a.Max.X, b.Max.X);
-            double o = max - min;
-            return o > eps ? o : 0.0;
-        }
-
-        private static double OverlapZ(BoundingBoxXYZ a, BoundingBoxXYZ b, double eps)
-        {
-            double min = Math.Max(a.Min.Z, b.Min.Z);
-            double max = Math.Min(a.Max.Z, b.Max.Z);
-            double o = max - min;
-            return o > eps ? o : 0.0;
-        }
-
-        private static bool TrySetParam(FamilyInstance fi, string name, double valFt)
-        {
-            if (fi == null) return false;
-
-            Parameter p = fi.LookupParameter(name);
-            if (p == null) return false;
-            if (p.IsReadOnly) return false;
-
-            try { p.Set(valFt); return true; }
-            catch { return false; }
-        }
-
-        private static bool TrySetDouble(FamilyInstance fi, string paramName, double value, string tagForLog)
-        {
-            try
-            {
-                var p = fi.LookupParameter(paramName);
-                if (p == null)
-                {
-                    Log($"{tagForLog} panelId={fi.Id.IntegerValue} param '{paramName}' not found");
-                    return false;
-                }
-                if (p.IsReadOnly)
-                {
-                    Log($"{tagForLog} panelId={fi.Id.IntegerValue} param '{paramName}' is read-only");
-                    return false;
-                }
-                p.Set(value);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log($"{tagForLog} panelId={fi.Id.IntegerValue} set '{paramName}' failed: {ex.Message}");
-                return false;
-            }
-        }
-
-        private BoundingBoxXYZ GetLocalBBoxFresh(Element e, Transform inverseTransform)
-        {
-            if (e == null || inverseTransform == null) return null;
-            var wb = e.get_BoundingBox(null);
-            if (wb == null) return null;
-            return TransformBoundingBoxToLocal(wb, inverseTransform);
-        }
-
-        /// <summary>
-        /// Трансформация BoundingBoxXYZ по 8 углам в локальную СК витража.
-        /// </summary>
         private BoundingBoxXYZ TransformBoundingBoxToLocal(BoundingBoxXYZ worldBbox, Transform inverseTransform)
         {
             if (worldBbox == null || inverseTransform == null) return null;
@@ -839,7 +1312,7 @@ namespace CWPanelsCustomizer
             double[] ys = { worldBbox.Min.Y, worldBbox.Max.Y };
             double[] zs = { worldBbox.Min.Z, worldBbox.Max.Z };
 
-            var pts = new List<XYZ>(8);
+            List<XYZ> pts = new List<XYZ>(8);
             foreach (double x in xs)
                 foreach (double y in ys)
                     foreach (double z in zs)
@@ -875,7 +1348,8 @@ namespace CWPanelsCustomizer
                 if (symbolIds == null || symbolIds.Count == 0)
                     return null;
 
-                return _doc.GetElement(symbolIds.First()) as FamilySymbol;
+                var firstSymbolId = symbolIds.First();
+                return _doc.GetElement(firstSymbolId) as FamilySymbol;
             }
             catch
             {
@@ -883,104 +1357,79 @@ namespace CWPanelsCustomizer
             }
         }
 
-        private static BoundingBoxXYZ ReduceBoundingBoxAroundCenter(BoundingBoxXYZ bbox, double reductionFactor)
+        private XYZ CenterOf(BoundingBoxXYZ b) =>
+            new XYZ((b.Min.X + b.Max.X) * 0.5, (b.Min.Y + b.Max.Y) * 0.5, (b.Min.Z + b.Max.Z) * 0.5);
+
+        private bool Intersects3D(BoundingBoxXYZ a, BoundingBoxXYZ b)
         {
-            if (bbox == null) return null;
-
-            var center = GetCenter(bbox);
-
-            double halfX = (bbox.Max.X - bbox.Min.X) * 0.5;
-            double halfY = (bbox.Max.Y - bbox.Min.Y) * 0.5;
-            double halfZ = (bbox.Max.Z - bbox.Min.Z) * 0.5;
-
-            double newHalfX = halfX * reductionFactor;
-            double newHalfY = halfY * reductionFactor;
-            double newHalfZ = halfZ * reductionFactor;
-
-            return new BoundingBoxXYZ
-            {
-                Min = new XYZ(center.X - newHalfX, center.Y - newHalfY, center.Z - newHalfZ),
-                Max = new XYZ(center.X + newHalfX, center.Y + newHalfY, center.Z + newHalfZ)
-            };
+            if (a == null || b == null) return false;
+            return !(a.Max.X < b.Min.X || a.Min.X > b.Max.X ||
+                     a.Max.Y < b.Min.Y || a.Min.Y > b.Max.Y ||
+                     a.Max.Z < b.Min.Z || a.Min.Z > b.Max.Z);
         }
 
-        // -------------------------
-        // 2D segment/rect helpers (XZ)
-        // -------------------------
-
-        private static List<FamilyInstance> GetHitPanelsBySegment2D(List<(FamilyInstance fi, BoundingBoxXYZ bbox)> panels, XYZ s1, XYZ s2)
+        private double OverlapX(BoundingBoxXYZ a, BoundingBoxXYZ b)
         {
-            var res = new List<FamilyInstance>();
-            foreach (var p in panels)
+            double min = Math.Max(a.Min.X, b.Min.X);
+            double max = Math.Min(a.Max.X, b.Max.X);
+            double o = max - min;
+            return o > EPS ? o : 0.0;
+        }
+
+        private double OverlapZ(BoundingBoxXYZ a, BoundingBoxXYZ b)
+        {
+            double min = Math.Max(a.Min.Z, b.Min.Z);
+            double max = Math.Min(a.Max.Z, b.Max.Z);
+            double o = max - min;
+            return o > EPS ? o : 0.0;
+        }
+
+        private bool TrySetParam(FamilyInstance fi, string name, double valFt)
+        {
+            if (fi == null) return false;
+            Parameter p = fi.LookupParameter(name);
+            if (p == null) return false;
+            if (p.IsReadOnly) return false;
+            try
             {
-                if (SegmentIntersectsRect2D(s1, s2, p.bbox))
-                    res.Add(p.fi);
+                p.Set(valFt);
+                return true;
             }
-            return res;
-        }
-
-        private static bool SegmentIntersectsRect2D(XYZ p1, XYZ p2, BoundingBoxXYZ panelBox)
-        {
-            if (panelBox == null) return false;
-
-            double minX = Math.Min(panelBox.Min.X, panelBox.Max.X);
-            double maxX = Math.Max(panelBox.Min.X, panelBox.Max.X);
-            double minZ = Math.Min(panelBox.Min.Z, panelBox.Max.Z);
-            double maxZ = Math.Max(panelBox.Min.Z, panelBox.Max.Z);
-
-            if (PointInRect2D(p1, minX, maxX, minZ, maxZ)) return true;
-            if (PointInRect2D(p2, minX, maxX, minZ, maxZ)) return true;
-
-            var r1 = new XYZ(minX, 0, minZ);
-            var r2 = new XYZ(maxX, 0, minZ);
-            var r3 = new XYZ(maxX, 0, maxZ);
-            var r4 = new XYZ(minX, 0, maxZ);
-
-            return SegmentsIntersect2D(p1, p2, r1, r2) ||
-                   SegmentsIntersect2D(p1, p2, r2, r3) ||
-                   SegmentsIntersect2D(p1, p2, r3, r4) ||
-                   SegmentsIntersect2D(p1, p2, r4, r1);
-        }
-
-        private static bool PointInRect2D(XYZ p, double minX, double maxX, double minZ, double maxZ) =>
-            p.X >= minX && p.X <= maxX && p.Z >= minZ && p.Z <= maxZ;
-
-        private static double Cross2D(XYZ a, XYZ b, XYZ c)
-        {
-            double abx = b.X - a.X;
-            double abz = b.Z - a.Z;
-            double acx = c.X - a.X;
-            double acz = c.Z - a.Z;
-            return abx * acz - abz * acx;
-        }
-
-        private static bool SegmentsIntersect2D(XYZ a, XYZ b, XYZ c, XYZ d)
-        {
-            const double EPS = 1e-9;
-
-            double d1 = Cross2D(a, b, c);
-            double d2 = Cross2D(a, b, d);
-            double d3 = Cross2D(c, d, a);
-            double d4 = Cross2D(c, d, b);
-
-            bool proper = ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS)) &&
-                          ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS));
-            if (proper) return true;
-
-            static bool Collinear(double val) => Math.Abs(val) <= EPS;
-
-            static bool OnSeg(XYZ p, XYZ q, XYZ r)
+            catch
             {
-                return q.X >= Math.Min(p.X, r.X) - EPS && q.X <= Math.Max(p.X, r.X) + EPS &&
-                       q.Z >= Math.Min(p.Z, r.Z) - EPS && q.Z <= Math.Max(p.Z, r.Z) + EPS;
+                return false;
             }
+        }
 
-            if (Collinear(d1) && OnSeg(a, c, b)) return true;
-            if (Collinear(d2) && OnSeg(a, d, b)) return true;
-            if (Collinear(d3) && OnSeg(c, a, d)) return true;
-            if (Collinear(d4) && OnSeg(c, b, d)) return true;
+        private bool TryGetDoubleParam(FamilyInstance fi, string name, out double valueFt)
+        {
+            valueFt = 0.0;
+            if (fi == null) return false;
 
-            return false;
+            try
+            {
+                var p = fi.LookupParameter(name);
+                if (p == null) return false;
+
+#if REVIT2021_OR_GREATER
+                // в новых версиях можно проверять тип, но оставляем максимально совместимо
+#endif
+                // Для Double параметров AsDouble() вернет значение в футах
+                valueFt = p.AsDouble();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private BoundingBoxXYZ GetLocalBBoxFresh(Element e, Transform inverseTransform)
+        {
+            if (e == null || inverseTransform == null) return null;
+            var wb = e.get_BoundingBox(null);
+            if (wb == null) return null;
+            return TransformBoundingBoxToLocal(wb, inverseTransform);
         }
     }
 }
