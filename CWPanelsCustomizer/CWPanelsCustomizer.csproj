@@ -75,10 +75,7 @@
     <EmbeddedResource Include="Images\a1.png" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Test\20251216_Задание на размещение стоек_01_2.7z.001" />
-    <None Include="Test\20251216_Задание на размещение стоек_01_2.7z.002" />
-    <None Include="Test\20251216_Задание на размещение стоек_01_2.7z.003" />
-    <None Include="Test\20251216_Задание на размещение стоек_01_2.7z.004" />
+    <Folder Include="Test\" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
