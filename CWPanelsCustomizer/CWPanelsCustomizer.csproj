@@ -75,7 +75,8 @@
     <EmbeddedResource Include="Images\a1.png" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Test\Никите_КРСТ_НВФ_Технология_В2.rvt" />
+    <None Include="Test\20251216_Задание на размещение стоек_01.rvt.001" />
+    <None Include="Test\20251216_Задание на размещение стоек_01.rvt.002" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
