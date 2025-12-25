@@ -39,7 +39,10 @@ namespace CWPanelsCustomizer
 
             return Result.Succeeded;
         }
-
+        /// <summary>
+        /// Осноснвая логика команды
+        /// </summary>
+        /// <exception cref="InvalidOperationException"></exception>
         private void Method()
         {
             Debug.WriteLine("=== test2.Method: START ===");
