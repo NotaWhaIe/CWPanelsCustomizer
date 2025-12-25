@@ -39,7 +39,10 @@ namespace CWPanelsCustomizer
 
             return Result.Succeeded;
         }
-
+        /// <summary>
+        /// Осноснвая логика команды
+        /// </summary>
+        /// <exception cref="InvalidOperationException"></exception>
         private void Method()
         {
             Debug.WriteLine("=== test2.Method: START ===");
@@ -191,7 +194,15 @@ namespace CWPanelsCustomizer
         // ==========================================================
         // GEOMETRY BOTTOM Z: WALL SOLID -> PANELS/MULLIONS SOLIDS -> BB FALLBACK
         // ==========================================================
-
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="wall"></param>
+        /// <param name="grid"></param>
+        /// <param name="viewForOptions"></param>
+        /// <returns></returns>
+        /// <exception cref="InvalidOperationException"></exception>
         private double GetCurtainWallBottomZ_ByGeometry(Document doc, Wall wall, CurtainGrid grid, View viewForOptions)
         {
             Debug.WriteLine("GetCurtainWallBottomZ_ByGeometry: try WALL geometry...");
