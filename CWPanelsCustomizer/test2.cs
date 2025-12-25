@@ -194,6 +194,15 @@ namespace CWPanelsCustomizer
         // ==========================================================
         // GEOMETRY BOTTOM Z: WALL SOLID -> PANELS/MULLIONS SOLIDS -> BB FALLBACK
         // ==========================================================
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="doc"></param>
+        /// <param name="wall"></param>
+        /// <param name="grid"></param>
+        /// <param name="viewForOptions"></param>
+        /// <returns></returns>
+        /// <exception cref="InvalidOperationException"></exception>
         private double GetCurtainWallBottomZ_ByGeometry(Document doc, Wall wall, CurtainGrid grid, View viewForOptions)
         {
             Debug.WriteLine("GetCurtainWallBottomZ_ByGeometry: try WALL geometry...");
