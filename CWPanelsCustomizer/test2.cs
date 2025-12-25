@@ -194,7 +194,20 @@ namespace CWPanelsCustomizer
         // ==========================================================
         // GEOMETRY BOTTOM Z: WALL SOLID -> PANELS/MULLIONS SOLIDS -> BB FALLBACK
         // ==========================================================
-
+        /// <summary>
+        /// Calculates the lowest Z-coordinate of a curtain wall by analyzing its geometry, including the wall solid,
+        /// associated panels, and mullions, with a fallback to the wall's bounding box if necessary.
+        /// </summary>
+        /// <remarks>This method attempts to obtain the most accurate bottom Z value by prioritizing solid
+        /// geometry analysis. If no valid geometry is found, it falls back to the wall's bounding box, which may be
+        /// less precise. The method does not modify the document or its elements.</remarks>
+        /// <param name="doc">The Revit document containing the curtain wall and its elements.</param>
+        /// <param name="wall">The curtain wall element for which to determine the bottom Z-coordinate.</param>
+        /// <param name="grid">The curtain grid associated with the curtain wall, used to access panel and mullion elements.</param>
+        /// <param name="viewForOptions">The view to use for geometry extraction options when analyzing solids.</param>
+        /// <returns>The lowest Z-coordinate value found among the wall, its panels, or mullions. If no geometry is available,
+        /// returns the minimum Z value from the wall's bounding box.</returns>
+        /// <exception cref="InvalidOperationException">Thrown if the bottom Z-coordinate cannot be determined from the wall, its panels, mullions, or bounding box.</exception>
         private double GetCurtainWallBottomZ_ByGeometry(Document doc, Wall wall, CurtainGrid grid, View viewForOptions)
         {
             Debug.WriteLine("GetCurtainWallBottomZ_ByGeometry: try WALL geometry...");
