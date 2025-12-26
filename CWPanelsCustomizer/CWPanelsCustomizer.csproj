@@ -65,6 +65,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="CurtainGridGenerator.cs" />
+    <Compile Include="CurtainGridGenerator2.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
     <Compile Include="CurtainPanelWindowConfiguration.cs" />
     <Compile Include="MullionPlacement.cs" />
