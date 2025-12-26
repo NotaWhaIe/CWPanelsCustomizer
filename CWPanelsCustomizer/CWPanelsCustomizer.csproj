@@ -64,9 +64,10 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="CurtainGridGenerator.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
-    <Compile Include="test1.cs" />
-    <Compile Include="test2.cs" />
+    <Compile Include="CurtainPanelWindowConfiguration.cs" />
+    <Compile Include="MullionPlacement.cs" />
     <Compile Include="_00_000_CassetsCatter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Helpers\ClassTemplate.cs" />
