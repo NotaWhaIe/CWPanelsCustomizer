@@ -9,7 +9,7 @@ namespace CWPanelsCustomizer
 {
     public class CurtainGridGenerator : IExternalCommand
     {
-        public static string IS_NAME => "Нарезать витраж на кассеты";
+        public static string IS_NAME => "Нарезать витраж";
         public static string IS_DESCRIPTION => "*Что делает плагин?";
 
         public static string IS_TAB_NAME => "#BIM";
