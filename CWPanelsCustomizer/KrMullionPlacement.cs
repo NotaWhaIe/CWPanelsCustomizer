@@ -11,11 +11,11 @@ using CWPanelsCustomizer.Helpers;
 namespace CWPanelsCustomizer
 {
     [Transaction(TransactionMode.Manual)]
-    public class MullionPlacement : IExternalCommand
+    public class KrMullionPlacement : IExternalCommand
     {
+        public static string IS_TAB_NAME => "КР";
         public static string IS_NAME => "Разместить стойки по витражу";
         public static string IS_DESCRIPTION => "Размещение семейства стоек по вертикальным линиям витража на поверхности стены";
-        public static string IS_TAB_NAME => "#BIM";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
 
         private SphereByPoint _sphereByPoint;

@@ -7,12 +7,12 @@ using System.Linq;
 
 namespace CWPanelsCustomizer
 {
-    public class CurtainGridGeneratorStep : IExternalCommand
+    public class ArGeneratorStep : IExternalCommand
     {
+        public static string IS_TAB_NAME => "АР";
         public static string IS_NAME => "Нарезать витраж со сдвижкой";
         public static string IS_DESCRIPTION => "Нарезка витражной сеткой 2000x2000 с кирпичным смещением (каждый нечётный ряд +50% ширины)";
 
-        public static string IS_TAB_NAME => "#BIM";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
 
         private SphereByPoint _sphereByPoint;

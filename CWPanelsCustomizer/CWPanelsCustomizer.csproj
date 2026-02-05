@@ -65,13 +65,12 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="CurtainGridGenerator.cs" />
-    <Compile Include="CurtainGridGeneratorStep.cs" />
+    <Compile Include="ArPanelsGenerator.cs" />
+    <Compile Include="ArGeneratorStep.cs" />
+    <Compile Include="ArPanelsCutByOpenings.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
-    <Compile Include="CurtainPanelWindowConfiguration.cs" />
-    <Compile Include="MullionPlacement.cs" />
-    <Compile Include="test.cs" />
-    <Compile Include="_00_000_CassetsCatter.cs" />
+    <Compile Include="KrPanelWindowConfiguration.cs" />
+    <Compile Include="KrMullionPlacement.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Helpers\ClassTemplate.cs" />
   </ItemGroup>

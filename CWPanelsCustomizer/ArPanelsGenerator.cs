@@ -9,12 +9,11 @@ using System.Linq;
 
 namespace CWPanelsCustomizer
 {
-    public class CurtainGridGenerator : IExternalCommand
+    public class ArPanelsGenerator : IExternalCommand
     {
+        public static string IS_TAB_NAME => "АР";
         public static string IS_NAME => "Нарезать витраж";
         public static string IS_DESCRIPTION => "*Что делает плагин?";
-
-        public static string IS_TAB_NAME => "#BIM";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
 
         private SphereByPoint _sphereByPoint;
