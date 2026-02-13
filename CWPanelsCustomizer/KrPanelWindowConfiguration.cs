@@ -76,10 +76,10 @@ namespace CWPanelsCustomizer
         private const string REGULAR_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         private const string G_PANEL_FAMILY_NAME = "КРСТ_НВФ_С Г-образным вырезом_В2";
-        private const string G_PANEL_FAMILY_NAME_TYPE = "26 мм_Левая";
+        private const string G_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         private const string L_PANEL_FAMILY_NAME = "КРСТ_НВФ_С L-образным вырезом";
-        private const string L_PANEL_FAMILY_NAME_TYPE = REGULAR_PANEL_FAMILY_NAME_TYPE;
+        private const string L_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {

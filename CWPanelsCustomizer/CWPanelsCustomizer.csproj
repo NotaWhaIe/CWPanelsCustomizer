@@ -77,9 +77,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Images\a1.png" />
   </ItemGroup>
-  <ItemGroup>
-    <Folder Include="Test\" />
-  </ItemGroup>
+  <ItemGroup />
   <ItemGroup>
     <None Include="packages.config" />
   </ItemGroup>
