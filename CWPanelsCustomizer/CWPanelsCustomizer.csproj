@@ -69,6 +69,7 @@
     <Compile Include="ArGeneratorStep.cs" />
     <Compile Include="ArPanelsCutByOpenings.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
+    <Compile Include="Helpers\RevitLogger.cs" />
     <Compile Include="KrPanelWindowConfiguration.cs" />
     <Compile Include="KrMullionPlacement.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
