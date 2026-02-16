@@ -362,3 +362,9 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 nul
+
+# JetBrains Rider
+.idea/
+
+# Local configuration files
+*.local.json
