@@ -21,6 +21,7 @@ namespace CWPanelsCustomizer
         private SphereByPoint _sphereByPoint;
         private UIDocument _uidoc;
         private Document _doc;
+        private RevitLogger _logger;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
@@ -28,18 +29,27 @@ namespace CWPanelsCustomizer
             _doc = _uidoc.Document;
             _sphereByPoint = new SphereByPoint(_doc);
 
-            RevitLogger.BeginSession(IS_NAME, _doc.Title);
+            _logger = RevitLogger.GetLogger(_doc);
+            _logger.BeginSession(IS_NAME, _doc.Title);
 
             using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
             {
                 tg.Start();
 
-                Method();
-
-                tg.Assimilate();
+                try
+                {
+                    Method();
+                    tg.Assimilate();
+                    _logger.EndSession("Succeeded");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error("FAILED", ex);
+                    _logger.EndSession("Failed");
+                    throw;
+                }
             }
 
-            RevitLogger.EndSession("Succeeded");
             return Result.Succeeded;
         }
         /// <summary>
@@ -48,27 +58,23 @@ namespace CWPanelsCustomizer
         /// <exception cref="InvalidOperationException"></exception>
         private void Method()
         {
-            RevitLogger.Info("=== test2.Method: START ===");
-
             View activeView = _doc.ActiveView;
-            RevitLogger.Info("ActiveView: Id=" + activeView.Id.IntegerValue + ", Name=" + activeView.Name + ", Type= " + activeView.ViewType);
-
             View3D view3D = activeView as View3D;
             if (view3D == null)
             {
-                RevitLogger.Error("ERROR: Активный вид не является 3D видом.");
+                _logger.Error("ERROR: Активный вид не является 3D видом.");
                 throw new InvalidOperationException("Команда должна запускаться на 3D виде.");
             }
 
             SketchPlane sketchPlane = view3D.SketchPlane;
             if (sketchPlane == null)
             {
-                RevitLogger.Error("ERROR: На 3D виде не задана рабочая плоскость (SketchPlane == null).");
+                _logger.Error("ERROR: На 3D виде не задана рабочая плоскость (SketchPlane == null).");
                 throw new InvalidOperationException("На активном 3D виде должна быть заранее настроена рабочая плоскость.");
             }
 
             Plane workPlane = sketchPlane.GetPlane();
-            RevitLogger.Debug("SketchPlane: Id=" + sketchPlane.Id.IntegerValue + ", Origin=" + FormatXyz(workPlane.Origin) + ", Normal=" + FormatXyz(workPlane.Normal));
+            _logger.Info("WorkPlane: Origin=" + FormatXyz(workPlane.Origin) + " Normal=" + FormatXyz(workPlane.Normal));
 
             const string familyName = "КРСТ_НВФ_ZIAS_Массив стоек с кронштейнами_В2";
             const string symbolName = "187";
@@ -76,11 +82,11 @@ namespace CWPanelsCustomizer
             FamilySymbol symbol = FindFamilySymbolByNames(_doc, familyName, symbolName);
             if (symbol == null)
             {
-                RevitLogger.Error("ERROR: Не найден FamilySymbol. FamilyName='" + familyName + "', TypeName='" + symbolName + "'.");
+                _logger.Error("ERROR: Не найден FamilySymbol. FamilyName='" + familyName + "', TypeName='" + symbolName + "'.");
                 throw new InvalidOperationException("Не найдено семейство/тип: " + familyName + " : " + symbolName);
             }
 
-            RevitLogger.Info("FamilySymbol: SymbolId=" + symbol.Id.IntegerValue + ", Family='" + symbol.FamilyName + "', Type='" + symbol.Name + "'");
+            _logger.Info("FamilySymbol: SymbolId=" + symbol.Id.IntegerValue + ", Family='" + symbol.FamilyName + "', Type='" + symbol.Name + "'");
 
             List<Wall> allCurtainWalls = new FilteredElementCollector(_doc)
                 .OfClass(typeof(Wall))
@@ -88,26 +94,26 @@ namespace CWPanelsCustomizer
                 .Where(w => w != null && w.CurtainGrid != null)
                 .ToList();
 
-            RevitLogger.Info("CurtainWalls found: " + allCurtainWalls.Count);
+            _logger.Info("CurtainWalls found: " + allCurtainWalls.Count);
 
             Wall targetWall = FindNearestCurtainWallToPlane(allCurtainWalls, workPlane);
             if (targetWall == null)
             {
-                RevitLogger.Error("ERROR: Не найден витраж (CurtainWall) рядом с рабочей плоскостью.");
+                _logger.Error("ERROR: Не найден витраж (CurtainWall) рядом с рабочей плоскостью.");
                 throw new InvalidOperationException("Не найден витраж (CurtainWall) рядом с рабочей плоскостью.");
             }
 
-            RevitLogger.Info("Target curtain wall: Id=" + targetWall.Id.IntegerValue + ", Name=" + targetWall.Name);
+            _logger.Info("Target curtain wall: Id=" + targetWall.Id.IntegerValue + ", Name=" + targetWall.Name);
 
             CurtainGrid curtainGrid = targetWall.CurtainGrid;
             if (curtainGrid == null)
             {
-                RevitLogger.Error("ERROR: У выбранного витража CurtainGrid == null.");
+                _logger.Error("ERROR: У выбранного витража CurtainGrid == null.");
                 throw new InvalidOperationException("У выбранного витража отсутствует CurtainGrid.");
             }
 
             List<CurtainGridLine> allGridLines = GetAllCurtainGridLines(_doc, curtainGrid);
-            RevitLogger.Info("CurtainGrid lines (U+V) total: " + allGridLines.Count);
+            _logger.Info("CurtainGrid lines (U+V) total: " + allGridLines.Count);
 
             List<CurtainGridLine> verticalGridLines = allGridLines
                 .Where(gl => gl != null)
@@ -121,11 +127,11 @@ namespace CWPanelsCustomizer
                 })
                 .ToList();
 
-            RevitLogger.Info("Vertical grid lines: " + verticalGridLines.Count);
+            _logger.Info("Vertical grid lines: " + verticalGridLines.Count);
 
             // Нижний обрез витража по геометрии (wall -> panels/mullions -> bb fallback)
             double minZ = GetCurtainWallBottomZ_ByGeometry(_doc, targetWall, curtainGrid, activeView);
-            RevitLogger.Info("CurtainWall bottom Z (geometry-based): " + minZ.ToString("F6"));
+            _logger.Info("CurtainWall bottom Z (geometry-based): " + minZ.ToString("F6"));
 
             // 1 мм в футах
             double toleranceFeet = 0.00328084;
@@ -135,12 +141,12 @@ namespace CWPanelsCustomizer
                 t.Start();
 
                 FailureHandlingOptions fho = t.GetFailureHandlingOptions();
-                fho.SetFailuresPreprocessor(new DuplicateInstancesWarningSuppressor());
+                fho.SetFailuresPreprocessor(new DuplicateInstancesWarningSuppressor(_logger));
                 t.SetFailureHandlingOptions(fho);
 
                 if (!symbol.IsActive)
                 {
-                    RevitLogger.Info("Symbol не активен -> Activate()");
+                    _logger.Info("Symbol не активен -> Activate()");
                     symbol.Activate();
                     _doc.Regenerate();
                 }
@@ -154,7 +160,7 @@ namespace CWPanelsCustomizer
                     Curve curve = GetGridLineCurve(gridLine);
                     if (curve == null)
                     {
-                        RevitLogger.Debug("GridLine[" + i + "]: curve is null -> skip");
+                        _logger.Debug("GridLine[" + i + "]: curve is null -> skip");
                         skipped++;
                         continue;
                     }
@@ -163,35 +169,24 @@ namespace CWPanelsCustomizer
                     XYZ rawPoint = new XYZ(mid.X, mid.Y, minZ);
                     XYZ projected = ProjectPointToPlane(rawPoint, workPlane);
 
-                    RevitLogger.Debug("GridLine[" + i + "]: Id=" + gridLine.Id.IntegerValue +
-                                    ", MidXY=" + FormatXyz(mid) +
-                                    ", RawBottomPoint=" + FormatXyz(rawPoint) +
-                                    ", Projected=" + FormatXyz(projected));
-
-                    FamilyInstance newInstance = _doc.Create.NewFamilyInstance(projected, symbol, sketchPlane, StructuralType.NonStructural);
-                    RevitLogger.Info("Created: InstanceId=" + newInstance.Id.IntegerValue);
-
-                    XYZ newPos = GetInstanceEffectivePosition(newInstance);
-                    RevitLogger.Debug("NewInstance EffectivePosition=" + FormatXyz(newPos));
-
-                    ElementId duplicateId = FindDuplicateInstanceIdByEffectivePosition(_doc, symbol, newInstance.Id, newPos, toleranceFeet);
-                    if (duplicateId != ElementId.InvalidElementId)
+                    ElementId existingId = FindDuplicateInstanceIdByEffectivePosition(_doc, symbol, ElementId.InvalidElementId, projected, toleranceFeet);
+                    if (existingId != ElementId.InvalidElementId)
                     {
-                        RevitLogger.Debug("DUPLICATE DETECTED: ExistingInstanceId=" + duplicateId.IntegerValue + " -> deleting newly created InstanceId=" + newInstance.Id.IntegerValue);
-                        _doc.Delete(newInstance.Id);
+                        _logger.Info("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + " → SKIPPED (existing=" + existingId.IntegerValue + ") Pos=" + FormatXyz(projected));
                         skipped++;
                         continue;
                     }
 
+                    FamilyInstance newInstance = _doc.Create.NewFamilyInstance(projected, symbol, sketchPlane, StructuralType.NonStructural);
+                    _logger.Info("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + " → Created InstanceId=" + newInstance.Id.IntegerValue + " Pos=" + FormatXyz(projected));
                     created++;
                 }
 
-                RevitLogger.LogSummary("Placement result", ("Created", created), ("SkippedOrDeleted", skipped));
+                _logger.LogSummary("Placement result", ("Created", created), ("SkippedOrDeleted", skipped));
 
                 t.Commit();
             }
 
-            RevitLogger.Info("=== test2.Method: END ===");
         }
 
         // ==========================================================
@@ -208,15 +203,10 @@ namespace CWPanelsCustomizer
         /// <exception cref="InvalidOperationException"></exception>
         private double GetCurtainWallBottomZ_ByGeometry(Document doc, Wall wall, CurtainGrid grid, View viewForOptions)
         {
-            RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: try WALL geometry...");
-
             if (TryGetElementMinZBySolid(doc, wall, viewForOptions, out double minZWall))
             {
-                RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: SUCCESS by WALL solid. minZ=" + minZWall.ToString("F6"));
                 return minZWall;
             }
-
-            RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: WALL solid has no points -> try PANELS/MULLIONS geometry...");
 
             List<ElementId> idsToCheck = new List<ElementId>();
 
@@ -227,7 +217,7 @@ namespace CWPanelsCustomizer
             }
             catch (Exception ex)
             {
-                RevitLogger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetPanelIds() exception", ex);
+                _logger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetPanelIds() exception", ex);
             }
 
             try
@@ -237,10 +227,8 @@ namespace CWPanelsCustomizer
             }
             catch (Exception ex)
             {
-                RevitLogger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetMullionIds() exception", ex);
+                _logger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetMullionIds() exception", ex);
             }
-
-            RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: dependent ids to check=" + idsToCheck.Count);
 
             double bestMinZ = double.MaxValue;
             int successCount = 0;
@@ -257,9 +245,6 @@ namespace CWPanelsCustomizer
                 }
             }
 
-            RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: PANELS/MULLIONS successCount=" + successCount +
-                            ", bestMinZ=" + (bestMinZ == double.MaxValue ? "<MaxValue>" : bestMinZ.ToString("F6")));
-
             if (successCount > 0 && bestMinZ != double.MaxValue)
             {
                 return bestMinZ;
@@ -268,7 +253,7 @@ namespace CWPanelsCustomizer
             BoundingBoxXYZ bb = wall.get_BoundingBox(null);
             if (bb != null && bb.Min != null)
             {
-                RevitLogger.Debug("GetCurtainWallBottomZ_ByGeometry: FALLBACK to WALL BoundingBox.Min.Z = " + bb.Min.Z.ToString("F6"));
+                _logger.Warn("GetCurtainWallBottomZ: используем FALLBACK BoundingBox.Min.Z=" + bb.Min.Z.ToString("F6"));
                 return bb.Min.Z;
             }
 
@@ -302,25 +287,16 @@ namespace CWPanelsCustomizer
             }
             catch (Exception ex)
             {
-                RevitLogger.Error("TryGetElementMinZBySolid: get_Geometry exception for ElementId=" + element.Id.IntegerValue, ex);
+                _logger.Error("TryGetElementMinZBySolid: get_Geometry exception for ElementId=" + element.Id.IntegerValue, ex);
                 return false;
             }
 
-            if (geom == null)
-            {
-                RevitLogger.Debug("TryGetElementMinZBySolid: GeometryElement is null for ElementId=" + element.Id.IntegerValue);
-                return false;
-            }
+            if (geom == null) return false;
 
             int solidsCount = 0;
             int pointsCount = 0;
 
             CollectMinZFromGeometry(geom, Transform.Identity, ref solidsCount, ref pointsCount, ref minZ);
-
-            RevitLogger.Debug("TryGetElementMinZBySolid: ElementId=" + element.Id.IntegerValue +
-                            ", solidsCount=" + solidsCount +
-                            ", pointsCount=" + pointsCount +
-                            ", minZ=" + (minZ == double.MaxValue ? "<MaxValue>" : minZ.ToString("F6")));
 
             return pointsCount > 0 && minZ != double.MaxValue;
         }
@@ -438,12 +414,9 @@ namespace CWPanelsCustomizer
                 }
             }
 
-            RevitLogger.Debug("UpdateMinZFromSolid: gotAnyPoint=" + gotAnyPoint +
-                            ", currentMinZ=" + (minZ == double.MaxValue ? "<MaxValue>" : minZ.ToString("F6")) +
-                            ", pointsCount=" + pointsCount);
         }
 
-        private static Wall FindNearestCurtainWallToPlane(List<Wall> curtainWalls, Plane plane)
+        private Wall FindNearestCurtainWallToPlane(List<Wall> curtainWalls, Plane plane)
         {
             if (curtainWalls == null || curtainWalls.Count == 0) return null;
             if (plane == null) return null;
@@ -469,13 +442,13 @@ namespace CWPanelsCustomizer
 
             if (best != null)
             {
-                RevitLogger.Info("Nearest curtain wall chosen: Id=" + best.Id.IntegerValue + ", DistToPlaneFt=" + bestDist.ToString("F6"));
+                _logger.Info("Nearest curtain wall chosen: Id=" + best.Id.IntegerValue + ", DistToPlaneFt=" + bestDist.ToString("F6"));
             }
 
             return best;
         }
 
-        private static List<CurtainGridLine> GetAllCurtainGridLines(Document doc, CurtainGrid grid)
+        private List<CurtainGridLine> GetAllCurtainGridLines(Document doc, CurtainGrid grid)
         {
             List<CurtainGridLine> result = new List<CurtainGridLine>();
             if (doc == null || grid == null) return result;
@@ -504,13 +477,13 @@ namespace CWPanelsCustomizer
             return result;
         }
 
-        private static Curve GetGridLineCurve(CurtainGridLine gridLine)
+        private Curve GetGridLineCurve(CurtainGridLine gridLine)
         {
             if (gridLine == null) return null;
             try { return gridLine.FullCurve; } catch { return null; }
         }
 
-        private static XYZ GetCurveDirection(Curve curve)
+        private XYZ GetCurveDirection(Curve curve)
         {
             if (curve == null) return XYZ.BasisX;
 
@@ -522,7 +495,7 @@ namespace CWPanelsCustomizer
             return v.Normalize();
         }
 
-        private static XYZ GetCurveMidPoint(Curve curve)
+        private XYZ GetCurveMidPoint(Curve curve)
         {
             if (curve == null) return XYZ.Zero;
 
@@ -539,7 +512,7 @@ namespace CWPanelsCustomizer
             return (p0 + p1) * 0.5;
         }
 
-        private static XYZ ProjectPointToPlane(XYZ point, Plane plane)
+        private XYZ ProjectPointToPlane(XYZ point, Plane plane)
         {
             if (point == null || plane == null) return point;
             XYZ v = point - plane.Origin;
@@ -547,7 +520,7 @@ namespace CWPanelsCustomizer
             return point - plane.Normal * d;
         }
 
-        private static XYZ GetInstanceEffectivePosition(FamilyInstance instance)
+        private XYZ GetInstanceEffectivePosition(FamilyInstance instance)
         {
             if (instance == null) return null;
 
@@ -560,7 +533,7 @@ namespace CWPanelsCustomizer
             return XYZ.Zero;
         }
 
-        private static ElementId FindDuplicateInstanceIdByEffectivePosition(Document doc, FamilySymbol symbol, ElementId excludeInstanceId, XYZ targetPos, double toleranceFeet)
+        private ElementId FindDuplicateInstanceIdByEffectivePosition(Document doc, FamilySymbol symbol, ElementId excludeInstanceId, XYZ targetPos, double toleranceFeet)
         {
             if (doc == null || symbol == null || targetPos == null) return ElementId.InvalidElementId;
 
@@ -587,10 +560,19 @@ namespace CWPanelsCustomizer
 
         private class DuplicateInstancesWarningSuppressor : IFailuresPreprocessor
         {
+            private readonly RevitLogger _logger;
+
+            public DuplicateInstancesWarningSuppressor(RevitLogger logger)
+            {
+                _logger = logger;
+            }
+
             public FailureProcessingResult PreprocessFailures(FailuresAccessor failuresAccessor)
             {
                 IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
                 if (failures == null || failures.Count == 0) return FailureProcessingResult.Continue;
+
+                int suppressedCount = 0;
 
                 foreach (FailureMessageAccessor fma in failures)
                 {
@@ -601,19 +583,22 @@ namespace CWPanelsCustomizer
 
                     if (text.Contains("В одном и том же месте имеются идентичные экземпляры"))
                     {
-                        RevitLogger.Warn("SUPPRESS WARNING: " + text);
+                        suppressedCount++;
                         failuresAccessor.DeleteWarning(fma);
                     }
+                }
+
+                if (suppressedCount > 0)
+                {
+                    _logger.Warn("SUPPRESS WARNING x" + suppressedCount + ": В одном и том же месте имеются идентичные экземпляры.");
                 }
 
                 return FailureProcessingResult.Continue;
             }
         }
 
-        private static FamilySymbol FindFamilySymbolByNames(Document doc, string familyName, string symbolName)
+        private FamilySymbol FindFamilySymbolByNames(Document doc, string familyName, string symbolName)
         {
-            RevitLogger.Debug("FindFamilySymbolByNames: FamilyName='" + familyName + "', TypeName='" + symbolName + "'");
-
             FilteredElementCollector collector = new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol));
 
             foreach (FamilySymbol fs in collector)
@@ -621,19 +606,17 @@ namespace CWPanelsCustomizer
                 if (string.Equals(fs.FamilyName, familyName, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(fs.Name, symbolName, StringComparison.OrdinalIgnoreCase))
                 {
-                    RevitLogger.Debug("FindFamilySymbolByNames: MATCH. SymbolId=" + fs.Id.IntegerValue);
                     return fs;
                 }
             }
 
-            RevitLogger.Debug("FindFamilySymbolByNames: NOT FOUND.");
             return null;
         }
 
-        private static string FormatXyz(XYZ p)
+        private string FormatXyz(XYZ p)
         {
             if (p == null) return "<null>";
-            return "(" + p.X.ToString("F6") + ", " + p.Y.ToString("F6") + ", " + p.Z.ToString("F6") + ")";
+            return "(" + p.X.ToString("F3") + ", " + p.Y.ToString("F3") + ", " + p.Z.ToString("F3") + ")";
         }
     }
 

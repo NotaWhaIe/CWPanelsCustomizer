@@ -1,73 +1,138 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using Autodesk.Revit.DB;
 
 namespace CWPanelsCustomizer.Helpers
 {
     /// <summary>
-    /// Статический логгер для записи в файл и Debug Output.
-    /// Путь к логу: %USERPROFILE%\source\repos\CWPanelsCustomizer\logs\cwpanels.log
+    /// Логгер для записи в файл и Debug Output.
+    /// Создаёт отдельный файл для каждого запуска команды.
+    /// Каждый документ Revit имеет свой экземпляр логгера (изоляция между документами).
+    /// Путь к логам: %USERPROFILE%\source\repos\CWPanelsCustomizer\logs\
+    /// Формат имени: YYYY-MM-DD_HHmmss_CommandName_ProjectName.log
     /// </summary>
-    internal static class RevitLogger
+    internal class RevitLogger
     {
-        private static readonly object _lock = new object();
-        private static readonly string _logPath;
-        private static string _currentCommandName = string.Empty;
+        private static readonly object _globalLock = new object();
+        private static readonly string _logsDir;
+        private static readonly Dictionary<int, RevitLogger> _instances = new Dictionary<int, RevitLogger>();
 
-        private const long MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024; // 5 МБ
-        private const int MAX_BACKUPS = 3;
+        private readonly object _instanceLock = new object();
+        private readonly string _documentName;
+        private string _currentLogPath = null;
+        private string _currentCommandName = string.Empty;
+
+        private const int MAX_LOG_FILES = 30; // Хранить последние N файлов логов
 
         static RevitLogger()
         {
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string logsDir = Path.Combine(userProfile, "source", "repos", "CWPanelsCustomizer", "logs");
+            _logsDir = Path.Combine(userProfile, "source", "repos", "CWPanelsCustomizer", "logs");
 
             try
             {
-                if (!Directory.Exists(logsDir))
+                if (!Directory.Exists(_logsDir))
                 {
-                    Directory.CreateDirectory(logsDir);
+                    Directory.CreateDirectory(_logsDir);
                 }
             }
             catch
             {
                 // Подавить ошибку создания директории
             }
+        }
 
-            _logPath = Path.Combine(logsDir, "cwpanels.log");
+        private RevitLogger(string documentName)
+        {
+            _documentName = documentName;
         }
 
         /// <summary>
-        /// Начать новую сессию команды
+        /// Получить логгер для конкретного документа Revit
         /// </summary>
-        public static void BeginSession(string commandName, string documentTitle = null)
+        public static RevitLogger GetLogger(Document doc)
         {
-            _currentCommandName = commandName ?? string.Empty;
+            if (doc == null)
+                throw new ArgumentNullException(nameof(doc));
 
-            string msg = documentTitle != null
-                ? $"========== SESSION START: {commandName} (Document: {documentTitle}) =========="
-                : $"========== SESSION START: {commandName} ==========";
+            int docHash = doc.GetHashCode();
+            string rawTitle = doc.Title ?? "UnknownProject";
+            // Убрать числовой префикс вида "20251216_" из начала названия документа
+            string docName = Regex.Replace(rawTitle, @"^\d+_", string.Empty);
 
-            WriteLog("INF", msg);
+            lock (_globalLock)
+            {
+                if (!_instances.ContainsKey(docHash))
+                {
+                    _instances[docHash] = new RevitLogger(docName);
+                }
+                return _instances[docHash];
+            }
+        }
+
+        /// <summary>
+        /// Удалить экземпляр логгера для документа (вызывать при закрытии документа)
+        /// </summary>
+        public static void RemoveLogger(Document doc)
+        {
+            if (doc == null) return;
+
+            int docHash = doc.GetHashCode();
+
+            lock (_globalLock)
+            {
+                _instances.Remove(docHash);
+            }
+        }
+
+        /// <summary>
+        /// Начать новую сессию команды (создаёт новый файл лога)
+        /// </summary>
+        public void BeginSession(string commandName, string documentTitle = null)
+        {
+            _currentCommandName = commandName ?? "UnknownCommand";
+
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
+            string safeCommandName = MakeSafeFileName(_currentCommandName);
+            string safeDocumentName = MakeSafeFileName(_documentName);
+            string baseName = $"{timestamp}__{safeDocumentName}__{safeCommandName}";
+
+            lock (_instanceLock)
+            {
+                _currentLogPath = Path.Combine(_logsDir, baseName + ".log");
+
+                CleanupOldLogs();
+            }
+
+            WriteLog("INF", "=== START ===");
         }
 
         /// <summary>
         /// Завершить сессию команды
         /// </summary>
-        public static void EndSession(string result = null)
+        public void EndSession(string result = null)
         {
             string msg = result != null
-                ? $"========== SESSION END: {_currentCommandName} (Result: {result}) =========="
-                : $"========== SESSION END: {_currentCommandName} ==========";
+                ? $"=== END: {result} ==="
+                : "=== END ===";
 
             WriteLog("INF", msg);
-            _currentCommandName = string.Empty;
+
+            lock (_instanceLock)
+            {
+                _currentLogPath = null;
+                _currentCommandName = string.Empty;
+            }
         }
 
         /// <summary>
         /// Отладочное сообщение
         /// </summary>
-        public static void Debug(string message)
+        public void Debug(string message)
         {
             WriteLog("DBG", message);
         }
@@ -75,7 +140,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Информационное сообщение
         /// </summary>
-        public static void Info(string message)
+        public void Info(string message)
         {
             WriteLog("INF", message);
         }
@@ -83,7 +148,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Предупреждение
         /// </summary>
-        public static void Warn(string message)
+        public void Warn(string message)
         {
             WriteLog("WRN", message);
         }
@@ -91,7 +156,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Ошибка
         /// </summary>
-        public static void Error(string message)
+        public void Error(string message)
         {
             WriteLog("ERR", message);
         }
@@ -99,7 +164,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Ошибка с исключением
         /// </summary>
-        public static void Error(string message, Exception ex)
+        public void Error(string message, Exception ex)
         {
             string fullMessage = ex != null
                 ? $"{message} | Exception: {ex.GetType().Name}: {ex.Message}"
@@ -110,7 +175,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Логирование координат точки
         /// </summary>
-        public static void LogPoint(string label, double x, double y, double z,
+        public void LogPoint(string label, double x, double y, double z,
                                     int? elementId = null, string elementCategory = null)
         {
             const double FEET_TO_MM = 304.8;
@@ -136,7 +201,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Логирование элемента Revit
         /// </summary>
-        public static void LogElement(string label, int elementId,
+        public void LogElement(string label, int elementId,
                                       string familyName = null, string typeName = null, string extraInfo = null)
         {
             string msg = $"{label}: ElementId={elementId}";
@@ -162,7 +227,7 @@ namespace CWPanelsCustomizer.Helpers
         /// <summary>
         /// Логирование сводной информации (пары ключ-значение)
         /// </summary>
-        public static void LogSummary(string methodTag, params (string key, object value)[] pairs)
+        public void LogSummary(string methodTag, params (string key, object value)[] pairs)
         {
             if (pairs == null || pairs.Length == 0)
             {
@@ -180,27 +245,23 @@ namespace CWPanelsCustomizer.Helpers
             WriteLog("SUM", msg);
         }
 
-        private static void WriteLog(string level, string message)
+        private void WriteLog(string level, string message)
         {
             try
             {
-                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                string commandTag = !string.IsNullOrEmpty(_currentCommandName)
-                    ? $"[{_currentCommandName}] "
-                    : string.Empty;
-
-                string logLine = $"{timestamp} [{level}] {commandTag}{message}";
+                string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+                string logLine = $"{timestamp} [{level}] {message}";
 
                 // Дублировать в Debug Output IDE
                 System.Diagnostics.Debug.WriteLine(logLine);
 
                 // Записать в файл
-                lock (_lock)
+                lock (_instanceLock)
                 {
-                    // Проверить размер файла и выполнить ротацию при необходимости
-                    RotateLogIfNeeded();
-
-                    File.AppendAllText(_logPath, logLine + Environment.NewLine);
+                    if (_currentLogPath != null)
+                    {
+                        File.AppendAllText(_currentLogPath, logLine + Environment.NewLine);
+                    }
                 }
             }
             catch
@@ -209,41 +270,51 @@ namespace CWPanelsCustomizer.Helpers
             }
         }
 
-        private static void RotateLogIfNeeded()
+        /// <summary>
+        /// Оставить только последние MAX_LOG_FILES файлов, остальные удалить
+        /// </summary>
+        private void CleanupOldLogs()
         {
             try
             {
-                if (!File.Exists(_logPath)) return;
+                if (!Directory.Exists(_logsDir)) return;
 
-                FileInfo fi = new FileInfo(_logPath);
-                if (fi.Length < MAX_LOG_SIZE_BYTES) return;
+                var filesToDelete = Directory.GetFiles(_logsDir, "*.log")
+                    .Select(f => new FileInfo(f))
+                    .OrderByDescending(fi => fi.LastWriteTime)
+                    .Skip(MAX_LOG_FILES)
+                    .ToList();
 
-                // Удалить самый старый бэкап
-                string oldestBackup = _logPath + $".{MAX_BACKUPS}";
-                if (File.Exists(oldestBackup))
+                foreach (var file in filesToDelete)
                 {
-                    File.Delete(oldestBackup);
+                    try { file.Delete(); }
+                    catch { }
                 }
-
-                // Сдвинуть существующие бэкапы
-                for (int i = MAX_BACKUPS - 1; i >= 1; i--)
-                {
-                    string src = _logPath + $".{i}";
-                    string dst = _logPath + $".{i + 1}";
-
-                    if (File.Exists(src))
-                    {
-                        File.Move(src, dst);
-                    }
-                }
-
-                // Переместить текущий лог в .1
-                File.Move(_logPath, _logPath + ".1");
             }
-            catch
+            catch { }
+        }
+
+        /// <summary>
+        /// Сделать безопасное имя файла из строки
+        /// </summary>
+        private string MakeSafeFileName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return "Unknown";
+
+            char[] invalidChars = Path.GetInvalidFileNameChars();
+            string safe = name;
+
+            foreach (char c in invalidChars)
             {
-                // Подавить ошибки ротации
+                safe = safe.Replace(c, '_');
             }
+
+            // Ограничить длину
+            if (safe.Length > 50)
+                safe = safe.Substring(0, 50);
+
+            return safe;
         }
     }
 }
