@@ -129,12 +129,12 @@ namespace CWPanelsCustomizer
 
             _logger.Info("Vertical grid lines: " + verticalGridLines.Count);
 
-            // Нижний обрез витража по геометрии (wall -> panels/mullions -> bb fallback)
-            double minZ = GetCurtainWallBottomZ_ByGeometry(_doc, targetWall, curtainGrid, activeView);
-            _logger.Info("CurtainWall bottom Z (geometry-based): " + minZ.ToString("F6"));
-
-            // 1 мм в футах
-            double toleranceFeet = 0.00328084;
+            // Удалить все существующие экземпляры этого FamilySymbol перед размещением
+            int deleted = DeleteExistingInstances(_doc, symbol);
+            if (deleted > 0)
+            {
+                _logger.Info("Deleted " + deleted + " existing instances of " + symbol.FamilyName + " : " + symbol.Name);
+            }
 
             using (Transaction t = new Transaction(_doc, "Place racks along vertical curtain grid (from bottom)"))
             {
@@ -152,7 +152,6 @@ namespace CWPanelsCustomizer
                 }
 
                 int created = 0;
-                int skipped = 0;
 
                 for (int i = 0; i < verticalGridLines.Count; i++)
                 {
@@ -161,257 +160,23 @@ namespace CWPanelsCustomizer
                     if (curve == null)
                     {
                         _logger.Debug("GridLine[" + i + "]: curve is null -> skip");
-                        skipped++;
                         continue;
                     }
 
-                    XYZ mid = GetCurveMidPoint(curve);
-                    XYZ rawPoint = new XYZ(mid.X, mid.Y, minZ);
+                    XYZ bottomPt = GetCurveBottomPoint(curve);
+                    XYZ rawPoint = new XYZ(bottomPt.X, bottomPt.Y, bottomPt.Z);
                     XYZ projected = ProjectPointToPlane(rawPoint, workPlane);
 
-                    ElementId existingId = FindDuplicateInstanceIdByEffectivePosition(_doc, symbol, ElementId.InvalidElementId, projected, toleranceFeet);
-                    if (existingId != ElementId.InvalidElementId)
-                    {
-                        _logger.Info("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + " → SKIPPED (existing=" + existingId.IntegerValue + ") Pos=" + FormatXyz(projected));
-                        skipped++;
-                        continue;
-                    }
+                    _logger.Debug("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + " bottomPt.Z=" + bottomPt.Z.ToString("F6") + " projected=" + FormatXyz(projected));
 
                     FamilyInstance newInstance = _doc.Create.NewFamilyInstance(projected, symbol, sketchPlane, StructuralType.NonStructural);
                     _logger.Info("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + " → Created InstanceId=" + newInstance.Id.IntegerValue + " Pos=" + FormatXyz(projected));
                     created++;
                 }
 
-                _logger.LogSummary("Placement result", ("Created", created), ("SkippedOrDeleted", skipped));
+                _logger.LogSummary("Placement result", ("Deleted", deleted), ("Created", created));
 
                 t.Commit();
-            }
-
-        }
-
-        // ==========================================================
-        // GEOMETRY BOTTOM Z: WALL SOLID -> PANELS/MULLIONS SOLIDS -> BB FALLBACK
-        // ==========================================================
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="doc"></param>
-        /// <param name="wall"></param>
-        /// <param name="grid"></param>
-        /// <param name="viewForOptions"></param>
-        /// <returns></returns>
-        /// <exception cref="InvalidOperationException"></exception>
-        private double GetCurtainWallBottomZ_ByGeometry(Document doc, Wall wall, CurtainGrid grid, View viewForOptions)
-        {
-            if (TryGetElementMinZBySolid(doc, wall, viewForOptions, out double minZWall))
-            {
-                return minZWall;
-            }
-
-            List<ElementId> idsToCheck = new List<ElementId>();
-
-            try
-            {
-                ICollection<ElementId> panelIds = grid.GetPanelIds();
-                if (panelIds != null && panelIds.Count > 0) idsToCheck.AddRange(panelIds);
-            }
-            catch (Exception ex)
-            {
-                _logger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetPanelIds() exception", ex);
-            }
-
-            try
-            {
-                ICollection<ElementId> mullionIds = grid.GetMullionIds();
-                if (mullionIds != null && mullionIds.Count > 0) idsToCheck.AddRange(mullionIds);
-            }
-            catch (Exception ex)
-            {
-                _logger.Error("GetCurtainWallBottomZ_ByGeometry: grid.GetMullionIds() exception", ex);
-            }
-
-            double bestMinZ = double.MaxValue;
-            int successCount = 0;
-
-            for (int i = 0; i < idsToCheck.Count; i++)
-            {
-                Element e = doc.GetElement(idsToCheck[i]);
-                if (e == null) continue;
-
-                if (TryGetElementMinZBySolid(doc, e, viewForOptions, out double z))
-                {
-                    successCount++;
-                    if (z < bestMinZ) bestMinZ = z;
-                }
-            }
-
-            if (successCount > 0 && bestMinZ != double.MaxValue)
-            {
-                return bestMinZ;
-            }
-
-            BoundingBoxXYZ bb = wall.get_BoundingBox(null);
-            if (bb != null && bb.Min != null)
-            {
-                _logger.Warn("GetCurtainWallBottomZ: используем FALLBACK BoundingBox.Min.Z=" + bb.Min.Z.ToString("F6"));
-                return bb.Min.Z;
-            }
-
-            throw new InvalidOperationException("Не удалось определить нижний обрез витража: нет точек по Solid у стены/панелей/импостов и нет BoundingBox.");
-        }
-
-        private bool TryGetElementMinZBySolid(Document doc, Element element, View viewForOptions, out double minZ)
-        {
-            minZ = double.MaxValue;
-
-            if (doc == null || element == null) return false;
-
-            Options opt = new Options();
-            opt.ComputeReferences = false;
-            opt.IncludeNonVisibleObjects = true;
-
-            // КРИТИЧНО: нельзя одновременно opt.View и opt.DetailLevel
-            if (viewForOptions != null)
-            {
-                opt.View = viewForOptions; // view-specific geometry
-            }
-            else
-            {
-                opt.DetailLevel = ViewDetailLevel.Fine;
-            }
-
-            GeometryElement geom;
-            try
-            {
-                geom = element.get_Geometry(opt);
-            }
-            catch (Exception ex)
-            {
-                _logger.Error("TryGetElementMinZBySolid: get_Geometry exception for ElementId=" + element.Id.IntegerValue, ex);
-                return false;
-            }
-
-            if (geom == null) return false;
-
-            int solidsCount = 0;
-            int pointsCount = 0;
-
-            CollectMinZFromGeometry(geom, Transform.Identity, ref solidsCount, ref pointsCount, ref minZ);
-
-            return pointsCount > 0 && minZ != double.MaxValue;
-        }
-
-        private void CollectMinZFromGeometry(GeometryElement geom, Transform currentTransform, ref int solidsCount, ref int pointsCount, ref double minZ)
-        {
-            foreach (GeometryObject obj in geom)
-            {
-                if (obj == null) continue;
-
-                Solid solid = obj as Solid;
-                if (solid != null)
-                {
-                    if (solid.Volume > 1e-9)
-                    {
-                        solidsCount++;
-                        UpdateMinZFromSolid(solid, currentTransform, ref pointsCount, ref minZ);
-                    }
-                    continue;
-                }
-
-                GeometryInstance inst = obj as GeometryInstance;
-                if (inst != null)
-                {
-                    Transform t = inst.Transform;
-                    Transform next = currentTransform;
-                    if (t != null) next = currentTransform.Multiply(t);
-
-                    GeometryElement instGeom = inst.GetInstanceGeometry();
-                    if (instGeom != null)
-                    {
-                        CollectMinZFromGeometry(instGeom, next, ref solidsCount, ref pointsCount, ref minZ);
-                    }
-                    continue;
-                }
-            }
-        }
-
-        private void UpdateMinZFromSolid(Solid solid, Transform transform, ref int pointsCount, ref double minZ)
-        {
-            if (solid == null) return;
-
-            bool gotAnyPoint = false;
-
-            FaceArray faces = solid.Faces;
-            if (faces != null)
-            {
-                foreach (Face face in faces)
-                {
-                    if (face == null) continue;
-
-                    Mesh mesh;
-                    try
-                    {
-                        mesh = face.Triangulate();
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (mesh == null) continue;
-
-                    IList<XYZ> vertices = mesh.Vertices;
-                    if (vertices == null || vertices.Count == 0) continue;
-
-                    for (int i = 0; i < vertices.Count; i++)
-                    {
-                        XYZ v = vertices[i];
-                        if (v == null) continue;
-
-                        XYZ p = (transform != null) ? transform.OfPoint(v) : v;
-
-                        if (p.Z < minZ) minZ = p.Z;
-                        pointsCount++;
-                        gotAnyPoint = true;
-                    }
-                }
-            }
-
-            if (!gotAnyPoint)
-            {
-                EdgeArray edges = solid.Edges;
-                if (edges != null && edges.Size > 0)
-                {
-                    for (int ei = 0; ei < edges.Size; ei++)
-                    {
-                        Edge e = edges.get_Item(ei);
-                        if (e == null) continue;
-
-                        IList<XYZ> pts;
-                        try
-                        {
-                            pts = e.Tessellate();
-                        }
-                        catch
-                        {
-                            continue;
-                        }
-
-                        if (pts == null || pts.Count == 0) continue;
-
-                        for (int pi = 0; pi < pts.Count; pi++)
-                        {
-                            XYZ v = pts[pi];
-                            if (v == null) continue;
-
-                            XYZ p = (transform != null) ? transform.OfPoint(v) : v;
-
-                            if (p.Z < minZ) minZ = p.Z;
-                            pointsCount++;
-                            gotAnyPoint = true;
-                        }
-                    }
-                }
             }
 
         }
@@ -483,6 +248,14 @@ namespace CWPanelsCustomizer
             try { return gridLine.FullCurve; } catch { return null; }
         }
 
+        private XYZ GetCurveBottomPoint(Curve curve)
+        {
+            if (curve == null) return XYZ.Zero;
+            XYZ p0 = curve.GetEndPoint(0);
+            XYZ p1 = curve.GetEndPoint(1);
+            return p0.Z <= p1.Z ? p0 : p1;
+        }
+
         private XYZ GetCurveDirection(Curve curve)
         {
             if (curve == null) return XYZ.BasisX;
@@ -495,23 +268,6 @@ namespace CWPanelsCustomizer
             return v.Normalize();
         }
 
-        private XYZ GetCurveMidPoint(Curve curve)
-        {
-            if (curve == null) return XYZ.Zero;
-
-            try
-            {
-                if (curve.IsBound) return curve.Evaluate(0.5, true);
-            }
-            catch
-            {
-            }
-
-            XYZ p0 = curve.GetEndPoint(0);
-            XYZ p1 = curve.GetEndPoint(1);
-            return (p0 + p1) * 0.5;
-        }
-
         private XYZ ProjectPointToPlane(XYZ point, Plane plane)
         {
             if (point == null || plane == null) return point;
@@ -520,42 +276,27 @@ namespace CWPanelsCustomizer
             return point - plane.Normal * d;
         }
 
-        private XYZ GetInstanceEffectivePosition(FamilyInstance instance)
+        private int DeleteExistingInstances(Document doc, FamilySymbol symbol)
         {
-            if (instance == null) return null;
+            if (doc == null || symbol == null) return 0;
 
-            LocationPoint lp = instance.Location as LocationPoint;
-            if (lp != null && lp.Point != null) return lp.Point;
+            List<ElementId> toDelete = new FilteredElementCollector(doc)
+                .OfClass(typeof(FamilyInstance))
+                .Cast<FamilyInstance>()
+                .Where(fi => fi.Symbol != null && fi.Symbol.Id.IntegerValue == symbol.Id.IntegerValue)
+                .Select(fi => fi.Id)
+                .ToList();
 
-            BoundingBoxXYZ bb = instance.get_BoundingBox(null);
-            if (bb != null && bb.Min != null && bb.Max != null) return (bb.Min + bb.Max) * 0.5;
+            if (toDelete.Count == 0) return 0;
 
-            return XYZ.Zero;
-        }
-
-        private ElementId FindDuplicateInstanceIdByEffectivePosition(Document doc, FamilySymbol symbol, ElementId excludeInstanceId, XYZ targetPos, double toleranceFeet)
-        {
-            if (doc == null || symbol == null || targetPos == null) return ElementId.InvalidElementId;
-
-            FilteredElementCollector collector = new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance));
-
-            foreach (FamilyInstance fi in collector)
+            using (Transaction t = new Transaction(doc, "Delete existing rack instances"))
             {
-                if (fi == null) continue;
-                if (fi.Id == excludeInstanceId) continue;
-
-                FamilySymbol fiSymbol = fi.Symbol;
-                if (fiSymbol == null) continue;
-                if (fiSymbol.Id.IntegerValue != symbol.Id.IntegerValue) continue;
-
-                XYZ pos = GetInstanceEffectivePosition(fi);
-                if (pos == null) continue;
-
-                double dist = pos.DistanceTo(targetPos);
-                if (dist <= toleranceFeet) return fi.Id;
+                t.Start();
+                doc.Delete(toDelete);
+                t.Commit();
             }
 
-            return ElementId.InvalidElementId;
+            return toDelete.Count;
         }
 
         private class DuplicateInstancesWarningSuppressor : IFailuresPreprocessor
@@ -578,19 +319,22 @@ namespace CWPanelsCustomizer
                 {
                     if (fma == null) continue;
 
+                    FailureSeverity severity = fma.GetSeverity();
                     string text = fma.GetDescriptionText();
-                    if (string.IsNullOrWhiteSpace(text)) continue;
 
-                    if (text.Contains("В одном и том же месте имеются идентичные экземпляры"))
+                    // Логируем ВСЁ: текст реального сообщения виден в логе независимо от языка Revit
+                    _logger.Info("REVIT FAILURE [" + severity + "]: " + text);
+
+                    if (severity == FailureSeverity.Warning)
                     {
-                        suppressedCount++;
                         failuresAccessor.DeleteWarning(fma);
+                        suppressedCount++;
                     }
                 }
 
                 if (suppressedCount > 0)
                 {
-                    _logger.Debug("SUPPRESS WARNING x" + suppressedCount + ": В одном и том же месте имеются идентичные экземпляры.");
+                    _logger.Info("SUPPRESS WARNING x" + suppressedCount + " (deleted)");
                 }
 
                 return FailureProcessingResult.Continue;

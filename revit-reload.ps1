@@ -40,15 +40,12 @@ if ([Win32]::IsIconic($hwnd)) {
 }
 
 [Win32]::SetForegroundWindow($hwnd) | Out-Null
-Start-Sleep -Milliseconds 400
-
-# Откат предыдущего запуска плагина
-[System.Windows.Forms.SendKeys]::SendWait("^z")
-Start-Sleep -Milliseconds 600
+Start-Sleep -Milliseconds 500
 
 # Запуск плагина через keyboard shortcut "02"
+# Плагин сам удаляет предыдущие экземпляры перед размещением новых
 [System.Windows.Forms.SendKeys]::SendWait("0")
-Start-Sleep -Milliseconds 100
+Start-Sleep -Milliseconds 300
 [System.Windows.Forms.SendKeys]::SendWait("2")
 
 Write-Host "Revit: откат выполнен, плагин запущен"
