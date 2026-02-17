@@ -25,6 +25,10 @@ namespace CWPanelsCustomizer
         private const double RACK_GAP_FT = RACK_GAP_MM / FEET_TO_MM;
         private const double RACK_START_OFFSET_MM = 5.0;
         private const double RACK_START_OFFSET_FT = RACK_START_OFFSET_MM / FEET_TO_MM;
+        private const double RACK_MIN_HEIGHT_MM = 1200.0;
+        private const double RACK_MIN_HEIGHT_FT = RACK_MIN_HEIGHT_MM / FEET_TO_MM;
+        private const double OPENING_TOP_OFFSET_MM = 95.0;
+        private const double OPENING_TOP_OFFSET_FT = OPENING_TOP_OFFSET_MM / FEET_TO_MM;
 
         private SphereByPoint _sphereByPoint;
         private UIDocument _uidoc;
@@ -220,7 +224,12 @@ namespace CWPanelsCustomizer
                     actualTopZ[i] = curve != null ? GetCurveTopPoint(curve).Z : 0;
                 }
 
-                // --- Этап 3: Размещение стоек столбиком (3000mm + 10mm зазор, добор сверху) ---
+                // --- Этап 2c: Сбор данных о проёмах для подрезки стоек ---
+                const string openingFamilyName = "#_Оконный проем_Прямоугольный";
+                List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal);
+                const double OPENING_MATCH_TOLERANCE_FT = 50.0 / FEET_TO_MM;
+
+                // --- Этап 3: Размещение стоек по свободным сегментам (с учётом проёмов) ---
                 int created = 0;
 
                 for (int i = 0; i < validGridLines.Count; i++)
@@ -238,41 +247,104 @@ namespace CWPanelsCustomizer
                         continue;
                     }
 
+                    // Найти проёмы, пересекающие эту линию сетки
+                    double gridLineHPos = wallHorizontal.DotProduct(bottomPt);
+                    List<double[]> matchingOpenings = FindOpeningsForGridLine(
+                        openingDataList, gridLineHPos, OPENING_MATCH_TOLERANCE_FT);
+                    List<double[]> freeSegments = GetFreeSegments(bottomZ, topZ, matchingOpenings);
+
                     _logger.Info("GridLine[" + origIdx + "] Id=" + validGridLines[i].Id.IntegerValue
                         + snapInfo
                         + " bottomZ=" + FormatFeetMm(bottomZ)
-                        + " topZ=" + FormatFeetMm(topZ));
+                        + " topZ=" + FormatFeetMm(topZ)
+                        + " openings=" + matchingOpenings.Count
+                        + " segments=" + freeSegments.Count);
 
-                    double currentZ = bottomZ;
+                    if (matchingOpenings.Count > 0)
+                    {
+                        foreach (var seg in freeSegments)
+                        {
+                            _logger.Info("    FreeSegment: " + FormatFeetMm(seg[0]) + ".." + FormatFeetMm(seg[1])
+                                + " h=" + FormatFeetMm(seg[1] - seg[0]));
+                        }
+                    }
+
                     int pieceIdx = 0;
 
-                    while (currentZ < topZ - 0.001)
+                    foreach (var segment in freeSegments)
                     {
-                        bool isFull = (currentZ + RACK_HEIGHT_FT + RACK_GAP_FT) <= topZ + 0.001;
-                        double pieceHeightFt = isFull ? RACK_HEIGHT_FT : (topZ - currentZ);
+                        double segBottom = segment[0];
+                        double segTop = segment[1];
+                        if (segTop - segBottom < 0.01) continue;
 
-                        if (pieceHeightFt < 0.001) break;
+                        double currentZ = segBottom;
 
-                        XYZ placementPt = new XYZ(bottomPt.X, bottomPt.Y, currentZ);
-                        XYZ projected = ProjectPointToPlane(placementPt, workPlane);
+                        while (currentZ < segTop - 0.001)
+                        {
+                            double remaining = segTop - currentZ;
+                            if (remaining < 0.001) break;
 
-                        FamilyInstance inst = _doc.Create.NewFamilyInstance(projected, symbol, sketchPlane, StructuralType.NonStructural);
-                        bool paramSet = TrySetParameter(inst, "Профиль_Длина", pieceHeightFt);
+                            double pieceHeightFt;
+                            bool isLast;
+                            string pieceTag;
 
-                        _logger.Info("  piece[" + pieceIdx + "] Id=" + inst.Id.IntegerValue
-                            + " Z=" + FormatFeetMm(currentZ)
-                            + " Профиль_Длина=" + FormatFeetMm(pieceHeightFt)
-                            + (isFull ? "" : " [filler]")
-                            + (paramSet ? " SET=OK" : " SET=FAIL")
-                            + " Pos=" + FormatXyz(projected));
+                            if (remaining <= RACK_HEIGHT_FT + 0.001)
+                            {
+                                pieceHeightFt = remaining;
+                                isLast = true;
+                                pieceTag = " [last]";
+                            }
+                            else
+                            {
+                                double afterFull = remaining - RACK_HEIGHT_FT - RACK_GAP_FT;
 
-                        created++;
-                        pieceIdx++;
+                                if (afterFull < RACK_MIN_HEIGHT_FT - 0.001)
+                                {
+                                    double adjusted = remaining - RACK_GAP_FT - RACK_MIN_HEIGHT_FT;
 
-                        if (isFull)
-                            currentZ += RACK_HEIGHT_FT + RACK_GAP_FT;
-                        else
-                            break;
+                                    if (adjusted >= RACK_MIN_HEIGHT_FT - 0.001)
+                                    {
+                                        pieceHeightFt = adjusted;
+                                        isLast = false;
+                                        pieceTag = " [min_guard_trim]";
+                                    }
+                                    else
+                                    {
+                                        pieceHeightFt = remaining;
+                                        isLast = true;
+                                        pieceTag = " [last_merged]";
+                                    }
+                                }
+                                else
+                                {
+                                    pieceHeightFt = RACK_HEIGHT_FT;
+                                    isLast = false;
+                                    pieceTag = "";
+                                }
+                            }
+
+                            if (pieceHeightFt < 0.001) break;
+
+                            XYZ placementPt = new XYZ(bottomPt.X, bottomPt.Y, currentZ);
+                            XYZ projected = ProjectPointToPlane(placementPt, workPlane);
+
+                            FamilyInstance inst = _doc.Create.NewFamilyInstance(
+                                projected, symbol, sketchPlane, StructuralType.NonStructural);
+                            bool paramSet = TrySetParameter(inst, "Профиль_Длина", pieceHeightFt);
+
+                            _logger.Info("  piece[" + pieceIdx + "] Id=" + inst.Id.IntegerValue
+                                + " Z=" + FormatFeetMm(currentZ)
+                                + " Профиль_Длина=" + FormatFeetMm(pieceHeightFt)
+                                + pieceTag
+                                + (paramSet ? " SET=OK" : " SET=FAIL")
+                                + " Pos=" + FormatXyz(projected));
+
+                            created++;
+                            pieceIdx++;
+
+                            if (isLast) break;
+                            currentZ += pieceHeightFt + RACK_GAP_FT;
+                        }
                     }
                 }
 
@@ -471,6 +543,92 @@ namespace CWPanelsCustomizer
             }
 
             return snapped;
+        }
+
+        private List<double[]> CollectWindowOpenings(string familyName, XYZ wallHorizontal)
+        {
+            var result = new List<double[]>();
+
+            List<FamilyInstance> openings = new FilteredElementCollector(_doc)
+                .OfClass(typeof(FamilyInstance))
+                .Cast<FamilyInstance>()
+                .Where(fi => fi.Symbol != null &&
+                    string.Equals(fi.Symbol.FamilyName, familyName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            _logger.Info("Window openings ('" + familyName + "'): " + openings.Count);
+
+            foreach (var opening in openings)
+            {
+                BoundingBoxXYZ bb = opening.get_BoundingBox(null);
+                if (bb == null) continue;
+
+                LocationPoint locPt = opening.Location as LocationPoint;
+                if (locPt == null) continue;
+
+                double hPos = wallHorizontal.DotProduct(locPt.Point);
+                result.Add(new[] { hPos, bb.Min.Z, bb.Max.Z });
+
+                _logger.Info("  Opening Id=" + opening.Id.IntegerValue
+                    + " hPos=" + FormatFeetMm(hPos)
+                    + " Z=" + FormatFeetMm(bb.Min.Z) + ".." + FormatFeetMm(bb.Max.Z));
+            }
+
+            return result;
+        }
+
+        private List<double[]> FindOpeningsForGridLine(
+            List<double[]> allOpenings, double gridLineHPos, double tolerance)
+        {
+            var result = new List<double[]>();
+            foreach (var opening in allOpenings)
+            {
+                if (Math.Abs(opening[0] - gridLineHPos) <= tolerance)
+                {
+                    result.Add(opening);
+                }
+            }
+            result.Sort((a, b) => a[1].CompareTo(b[1]));
+            return result;
+        }
+
+        private List<double[]> GetFreeSegments(double bottomZ, double topZ, List<double[]> sortedOpenings)
+        {
+            var segments = new List<double[]>();
+            if (sortedOpenings == null || sortedOpenings.Count == 0)
+            {
+                segments.Add(new[] { bottomZ, topZ });
+                return segments;
+            }
+
+            double currentStart = bottomZ;
+
+            foreach (var opening in sortedOpenings)
+            {
+                double openingMin = opening[1];
+                double openingMax = opening[2];
+
+                if (openingMax <= currentStart + 0.001) continue;
+
+                if (openingMin > currentStart + 0.001)
+                {
+                    double segEnd = Math.Min(openingMin, topZ);
+                    if (segEnd > currentStart + 0.001)
+                    {
+                        segments.Add(new[] { currentStart, segEnd });
+                    }
+                }
+
+                currentStart = Math.Max(currentStart, openingMax - OPENING_TOP_OFFSET_FT);
+                if (currentStart >= topZ - 0.001) break;
+            }
+
+            if (currentStart < topZ - 0.001)
+            {
+                segments.Add(new[] { currentStart, topZ });
+            }
+
+            return segments;
         }
 
         private XYZ GetCurveDirection(Curve curve)
