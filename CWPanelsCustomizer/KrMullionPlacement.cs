@@ -590,7 +590,7 @@ namespace CWPanelsCustomizer
 
                 if (suppressedCount > 0)
                 {
-                    _logger.Warn("SUPPRESS WARNING x" + suppressedCount + ": В одном и том же месте имеются идентичные экземпляры.");
+                    _logger.Debug("SUPPRESS WARNING x" + suppressedCount + ": В одном и том же месте имеются идентичные экземпляры.");
                 }
 
                 return FailureProcessingResult.Continue;
