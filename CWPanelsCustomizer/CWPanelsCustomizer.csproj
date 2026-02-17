@@ -72,6 +72,7 @@
     <Compile Include="Helpers\SphereByPoint.cs" />
     <Compile Include="Helpers\RevitLogger.cs" />
     <Compile Include="KrPanelWindowConfiguration.cs" />
+    <Compile Include="KrModelStateLogger.cs" />
     <Compile Include="KrMullionPlacement.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Helpers\ClassTemplate.cs" />

@@ -14,6 +14,9 @@ public class Win32 {
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 }
 "@
 
@@ -39,7 +42,16 @@ if ([Win32]::IsIconic($hwnd)) {
     Start-Sleep -Milliseconds 300
 }
 
+# Два способа переключить фокус на Revit:
+# 1. Alt-трюк разрешает SetForegroundWindow из фонового процесса
+[Win32]::keybd_event(0x12, 0, 0, 0)
+[Win32]::keybd_event(0x12, 0, 2, 0)
 [Win32]::SetForegroundWindow($hwnd) | Out-Null
+Start-Sleep -Milliseconds 300
+
+# 2. WScript.Shell.AppActivate — более высокоуровневый и надёжный
+$wsh = New-Object -ComObject Wscript.Shell
+$wsh.AppActivate($revitProcess.Id) | Out-Null
 Start-Sleep -Milliseconds 500
 
 # Запуск плагина через keyboard shortcut "02"
