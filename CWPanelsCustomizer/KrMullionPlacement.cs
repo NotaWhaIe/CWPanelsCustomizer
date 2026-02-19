@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -29,6 +29,8 @@ namespace CWPanelsCustomizer
         private const double RACK_MIN_HEIGHT_FT = RACK_MIN_HEIGHT_MM / FEET_TO_MM;
         private const double OPENING_TOP_OFFSET_MM = 95.0;
         private const double OPENING_TOP_OFFSET_FT = OPENING_TOP_OFFSET_MM / FEET_TO_MM;
+        private const double EDGE_OFFSET_MM = 150.0;
+        private const double EDGE_OFFSET_FT = EDGE_OFFSET_MM / FEET_TO_MM;
 
         private SphereByPoint _sphereByPoint;
         private UIDocument _uidoc;
@@ -64,13 +66,11 @@ namespace CWPanelsCustomizer
 
             return Result.Succeeded;
         }
-        /// <summary>
-        /// Осноснвая логика команды
-        /// </summary>
-        /// <exception cref="InvalidOperationException"></exception>
+
         private void Method()
         {
             Stopwatch sw = Stopwatch.StartNew();
+            _logger.Info("CODE_VERSION: edge_mullion_v2");
 
             View activeView = _doc.ActiveView;
             View3D view3D = activeView as View3D;
@@ -133,7 +133,7 @@ namespace CWPanelsCustomizer
             int vCount = vIds != null ? vIds.Count : 0;
             _logger.Info("CurtainGrid lines: U=" + uCount + " V=" + vCount + " total=" + (uCount + vCount));
 
-            List<CurtainGridLine> allGridLines = GetAllCurtainGridLines(_doc, curtainGrid);
+            List<CurtainGridLine> allGridLines = GetAllCurtainGridLines(curtainGrid);
 
             List<CurtainGridLine> verticalGridLines = allGridLines
                 .Where(gl => gl != null)
@@ -142,8 +142,7 @@ namespace CWPanelsCustomizer
                     Curve c = GetGridLineCurve(gl);
                     if (c == null) return false;
                     XYZ dir = GetCurveDirection(c);
-                    double verticality = Math.Abs(dir.DotProduct(XYZ.BasisZ));
-                    return verticality >= 0.99;
+                    return Math.Abs(dir.DotProduct(XYZ.BasisZ)) >= 0.99;
                 })
                 .ToList();
 
@@ -155,14 +154,12 @@ namespace CWPanelsCustomizer
                 return;
             }
 
-            // Удалить все существующие экземпляры нового семейства и остатки старого
+            // Удалить все существующие экземпляры
             int deletedOld = DeleteExistingInstancesByFamilyName(_doc, oldFamilyName);
             int deleted = DeleteExistingInstances(_doc, symbol);
             int totalDeleted = deleted + deletedOld;
             if (totalDeleted > 0)
-            {
                 _logger.Info("Deleted: new_family=" + deleted + " old_family=" + deletedOld + " total=" + totalDeleted);
-            }
 
             using (Transaction t = new Transaction(_doc, "Place racks along vertical curtain grid (from bottom)"))
             {
@@ -174,36 +171,31 @@ namespace CWPanelsCustomizer
 
                 if (!symbol.IsActive)
                 {
-                    _logger.Info("Symbol не активен -> Activate()");
                     symbol.Activate();
                     _doc.Regenerate();
                 }
 
-                // --- Этап 1: Сбор данных ---
+                // --- Этап 1: Сбор данных линий сетки ---
                 List<int> origIndices = new List<int>();
                 List<CurtainGridLine> validGridLines = new List<CurtainGridLine>();
                 List<XYZ> bottomPoints = new List<XYZ>();
 
                 for (int i = 0; i < verticalGridLines.Count; i++)
                 {
-                    CurtainGridLine gridLine = verticalGridLines[i];
-                    Curve curve = GetGridLineCurve(gridLine);
+                    Curve curve = GetGridLineCurve(verticalGridLines[i]);
                     if (curve == null)
                     {
-                        _logger.Warn("GridLine[" + i + "] Id=" + gridLine.Id.IntegerValue + ": FullCurve is null -> skip");
+                        _logger.Warn("GridLine[" + i + "] Id=" + verticalGridLines[i].Id.IntegerValue + ": FullCurve is null -> skip");
                         continue;
                     }
                     origIndices.Add(i);
-                    validGridLines.Add(gridLine);
+                    validGridLines.Add(verticalGridLines[i]);
                     bottomPoints.Add(GetCurveBottomPoint(curve));
                 }
 
                 // --- Этап 2: Сортировка и snap переходных Z ---
                 XYZ wallHorizontal = workPlane.Normal.CrossProduct(XYZ.BasisZ);
-                if (!wallHorizontal.IsZeroLength())
-                    wallHorizontal = wallHorizontal.Normalize();
-                else
-                    wallHorizontal = XYZ.BasisX;
+                wallHorizontal = !wallHorizontal.IsZeroLength() ? wallHorizontal.Normalize() : XYZ.BasisX;
 
                 int[] sortOrder = Enumerable.Range(0, bottomPoints.Count).ToArray();
                 Array.Sort(sortOrder, (a, b) => wallHorizontal.DotProduct(bottomPoints[a])
@@ -216,7 +208,7 @@ namespace CWPanelsCustomizer
                 for (int s = 0; s < sortOrder.Length; s++)
                     snappedZ[sortOrder[s]] = snappedSortedZ[s];
 
-                // --- Этап 2b: Верхний обрез из FullCurve линий сетки (обрезаны по контуру витража) ---
+                // Верхний обрез из FullCurve
                 double[] actualTopZ = new double[validGridLines.Count];
                 for (int i = 0; i < validGridLines.Count; i++)
                 {
@@ -224,12 +216,13 @@ namespace CWPanelsCustomizer
                     actualTopZ[i] = curve != null ? GetCurveTopPoint(curve).Z : 0;
                 }
 
-                // --- Этап 2c: Сбор данных о проёмах для подрезки стоек ---
+                // Проёмы и рёбра контура
                 const string openingFamilyName = "#_Оконный проем_Прямоугольный";
                 List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal);
                 const double OPENING_MATCH_TOLERANCE_FT = 50.0 / FEET_TO_MM;
+                List<double[]> outlineEdges = GetWallOutlineVerticalEdges(targetWall, wallHorizontal);
 
-                // --- Этап 3: Размещение стоек по свободным сегментам (с учётом проёмов) ---
+                // --- Этап 3: Размещение стоек по линиям сетки ---
                 int created = 0;
 
                 for (int i = 0; i < validGridLines.Count; i++)
@@ -238,6 +231,10 @@ namespace CWPanelsCustomizer
                     XYZ bottomPt = bottomPoints[i];
                     double bottomZ = snappedZ[i] + RACK_START_OFFSET_FT;
                     double topZ = actualTopZ[i];
+
+                    double gridH_trim = wallHorizontal.DotProduct(bottomPt);
+                    TrimGridLineByOutlineEdges(outlineEdges, gridH_trim, ref bottomZ, ref topZ);
+
                     bool wasSnapped = Math.Abs(snappedZ[i] - bottomPt.Z) > 0.001;
                     string snapInfo = wasSnapped ? " snap=" + FormatFeetMm(snappedZ[i]) : "";
 
@@ -247,7 +244,6 @@ namespace CWPanelsCustomizer
                         continue;
                     }
 
-                    // Найти проёмы, пересекающие эту линию сетки
                     double gridLineHPos = wallHorizontal.DotProduct(bottomPt);
                     List<double[]> matchingOpenings = FindOpeningsForGridLine(
                         openingDataList, gridLineHPos, OPENING_MATCH_TOLERANCE_FT);
@@ -261,95 +257,80 @@ namespace CWPanelsCustomizer
                         + " segments=" + freeSegments.Count);
 
                     if (matchingOpenings.Count > 0)
-                    {
                         foreach (var seg in freeSegments)
-                        {
                             _logger.Info("    FreeSegment: " + FormatFeetMm(seg[0]) + ".." + FormatFeetMm(seg[1])
                                 + " h=" + FormatFeetMm(seg[1] - seg[0]));
-                        }
-                    }
 
-                    int pieceIdx = 0;
+                    created += PlaceRacksInSegments(freeSegments, bottomPt, workPlane, sketchPlane, symbol, "piece");
+                }
 
-                    foreach (var segment in freeSegments)
+                // --- Этап 4: Размещение стоек по краям витража ---
+                _logger.Info("=== Edge mullion placement ===");
+                List<double[]> mergedEdges = ExtendOutlineEdgesZ(outlineEdges);
+                _logger.Info("Wall outline vertical edges: " + outlineEdges.Count + " (after extend: " + mergedEdges.Count + ")");
+
+                foreach (var edge in mergedEdges)
+                {
+                    double edgeH = edge[0];
+                    double edgeZBot = edge[1];
+                    double edgeZTop = edge[2];
+
+                    _logger.Info("OutlineEdge: H=" + FormatFeetMm(edgeH)
+                        + " Z=" + FormatFeetMm(edgeZBot) + ".." + FormatFeetMm(edgeZTop));
+
+                    double mullionH = ComputeEdgeMullionHPos(
+                        edgeH, edgeZBot, edgeZTop,
+                        bottomPoints, actualTopZ, snappedZ, wallHorizontal);
+
+                    // Пропустить если слишком близко к существующей линии сетки
+                    bool tooCloseToGrid = false;
+                    for (int i = 0; i < bottomPoints.Count; i++)
                     {
-                        double segBottom = segment[0];
-                        double segTop = segment[1];
-                        if (segTop - segBottom < 0.01) continue;
-
-                        double currentZ = segBottom;
-
-                        while (currentZ < segTop - 0.001)
+                        double gridH = wallHorizontal.DotProduct(bottomPoints[i]);
+                        if (Math.Abs(gridH - mullionH) < EDGE_OFFSET_FT * 0.5
+                            && actualTopZ[i] > edgeZBot + 0.01
+                            && snappedZ[i] < edgeZTop - 0.01)
                         {
-                            double remaining = segTop - currentZ;
-                            if (remaining < 0.001) break;
-
-                            double pieceHeightFt;
-                            bool isLast;
-                            string pieceTag;
-
-                            if (remaining <= RACK_HEIGHT_FT + 0.001)
-                            {
-                                pieceHeightFt = remaining;
-                                isLast = true;
-                                pieceTag = " [last]";
-                            }
-                            else
-                            {
-                                double afterFull = remaining - RACK_HEIGHT_FT - RACK_GAP_FT;
-
-                                if (afterFull < RACK_MIN_HEIGHT_FT - 0.001)
-                                {
-                                    double adjusted = remaining - RACK_GAP_FT - RACK_MIN_HEIGHT_FT;
-
-                                    if (adjusted >= RACK_MIN_HEIGHT_FT - 0.001)
-                                    {
-                                        pieceHeightFt = adjusted;
-                                        isLast = false;
-                                        pieceTag = " [min_guard_trim]";
-                                    }
-                                    else
-                                    {
-                                        pieceHeightFt = remaining;
-                                        isLast = true;
-                                        pieceTag = " [last_merged]";
-                                    }
-                                }
-                                else
-                                {
-                                    pieceHeightFt = RACK_HEIGHT_FT;
-                                    isLast = false;
-                                    pieceTag = "";
-                                }
-                            }
-
-                            if (pieceHeightFt < 0.001) break;
-
-                            XYZ placementPt = new XYZ(bottomPt.X, bottomPt.Y, currentZ);
-                            XYZ projected = ProjectPointToPlane(placementPt, workPlane);
-
-                            FamilyInstance inst = _doc.Create.NewFamilyInstance(
-                                projected, symbol, sketchPlane, StructuralType.NonStructural);
-                            bool paramSet = TrySetParameter(inst, "Профиль_Длина", pieceHeightFt);
-
-                            _logger.Info("  piece[" + pieceIdx + "] Id=" + inst.Id.IntegerValue
-                                + " Z=" + FormatFeetMm(currentZ)
-                                + " Профиль_Длина=" + FormatFeetMm(pieceHeightFt)
-                                + pieceTag
-                                + (paramSet ? " SET=OK" : " SET=FAIL")
-                                + " Pos=" + FormatXyz(projected));
-
-                            created++;
-                            pieceIdx++;
-
-                            if (isLast) break;
-                            currentZ += pieceHeightFt + RACK_GAP_FT;
+                            tooCloseToGrid = true;
+                            break;
                         }
                     }
+                    if (tooCloseToGrid)
+                    {
+                        _logger.Info("  Skip: too close to existing grid line");
+                        continue;
+                    }
+
+                    double edgeBottomZ = edgeZBot + RACK_START_OFFSET_FT;
+                    double edgeTopZ = edgeZTop;
+
+                    if (edgeTopZ - edgeBottomZ < RACK_MIN_HEIGHT_FT - 0.001)
+                    {
+                        _logger.Info("  Skip: height too small (" + FormatFeetMm(edgeTopZ - edgeBottomZ) + ")");
+                        continue;
+                    }
+
+                    // Вычислить опорную 3D-точку
+                    XYZ refPt = bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin;
+                    double refH = wallHorizontal.DotProduct(refPt);
+                    XYZ edgeBasePt = new XYZ(
+                        refPt.X + wallHorizontal.X * (mullionH - refH),
+                        refPt.Y + wallHorizontal.Y * (mullionH - refH),
+                        0);
+
+                    List<double[]> edgeOpenings = FindOpeningsForGridLine(
+                        openingDataList, mullionH, OPENING_MATCH_TOLERANCE_FT);
+                    List<double[]> edgeSegments = GetFreeSegments(edgeBottomZ, edgeTopZ, edgeOpenings);
+
+                    _logger.Info("  EdgeMullion: H=" + FormatFeetMm(mullionH)
+                        + " Z=" + FormatFeetMm(edgeBottomZ) + ".." + FormatFeetMm(edgeTopZ)
+                        + " openings=" + edgeOpenings.Count
+                        + " segments=" + edgeSegments.Count);
+
+                    created += PlaceRacksInSegments(edgeSegments, edgeBasePt, workPlane, sketchPlane, symbol, "edge_piece");
                 }
 
                 _logger.LogSummary("Placement result", ("Deleted", totalDeleted), ("Created", created));
-
                 t.Commit();
             }
 
@@ -357,10 +338,100 @@ namespace CWPanelsCustomizer
             _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
         }
 
+        /// <summary>
+        /// Размещает стойки с разбивкой по высоте в заданных свободных сегментах.
+        /// Возвращает количество созданных экземпляров.
+        /// </summary>
+        private int PlaceRacksInSegments(List<double[]> segments, XYZ basePt,
+            Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, string logPrefix)
+        {
+            int created = 0;
+            int pieceIdx = 0;
+
+            foreach (var segment in segments)
+            {
+                double segBottom = segment[0];
+                double segTop = segment[1];
+                if (segTop - segBottom < 0.01) continue;
+
+                double currentZ = segBottom;
+
+                while (currentZ < segTop - 0.001)
+                {
+                    double remaining = segTop - currentZ;
+                    if (remaining < 0.001) break;
+
+                    double pieceHeightFt;
+                    bool isLast;
+                    string pieceTag;
+
+                    if (remaining <= RACK_HEIGHT_FT + 0.001)
+                    {
+                        pieceHeightFt = remaining;
+                        isLast = true;
+                        pieceTag = " [last]";
+                    }
+                    else
+                    {
+                        double afterFull = remaining - RACK_HEIGHT_FT - RACK_GAP_FT;
+
+                        if (afterFull < RACK_MIN_HEIGHT_FT - 0.001)
+                        {
+                            double adjusted = remaining - RACK_GAP_FT - RACK_MIN_HEIGHT_FT;
+
+                            if (adjusted >= RACK_MIN_HEIGHT_FT - 0.001)
+                            {
+                                pieceHeightFt = adjusted;
+                                isLast = false;
+                                pieceTag = " [min_guard_trim]";
+                            }
+                            else
+                            {
+                                pieceHeightFt = remaining;
+                                isLast = true;
+                                pieceTag = " [last_merged]";
+                            }
+                        }
+                        else
+                        {
+                            pieceHeightFt = RACK_HEIGHT_FT;
+                            isLast = false;
+                            pieceTag = "";
+                        }
+                    }
+
+                    if (pieceHeightFt < 0.001) break;
+
+                    XYZ placementPt = new XYZ(basePt.X, basePt.Y, currentZ);
+                    XYZ projected = ProjectPointToPlane(placementPt, workPlane);
+
+                    FamilyInstance inst = _doc.Create.NewFamilyInstance(
+                        projected, symbol, sketchPlane, StructuralType.NonStructural);
+                    bool paramSet = TrySetParameter(inst, "Профиль_Длина", pieceHeightFt);
+
+                    _logger.Info("  " + logPrefix + "[" + pieceIdx + "] Id=" + inst.Id.IntegerValue
+                        + " Z=" + FormatFeetMm(currentZ)
+                        + " Профиль_Длина=" + FormatFeetMm(pieceHeightFt)
+                        + pieceTag
+                        + (paramSet ? " SET=OK" : " SET=FAIL")
+                        + " Pos=" + FormatXyz(projected));
+
+                    created++;
+                    pieceIdx++;
+
+                    if (isLast) break;
+                    currentZ += pieceHeightFt + RACK_GAP_FT;
+                }
+            }
+
+            return created;
+        }
+
+        #region Helpers
+
         private Wall FindNearestCurtainWallToPlane(List<Wall> curtainWalls, Plane plane)
         {
-            if (curtainWalls == null || curtainWalls.Count == 0) return null;
-            if (plane == null) return null;
+            if (curtainWalls == null || curtainWalls.Count == 0 || plane == null) return null;
 
             Wall best = null;
             double bestDist = double.MaxValue;
@@ -371,48 +442,31 @@ namespace CWPanelsCustomizer
                 if (bb == null || bb.Min == null || bb.Max == null) continue;
 
                 XYZ center = (bb.Min + bb.Max) * 0.5;
-                double signed = plane.Normal.DotProduct(center - plane.Origin);
-                double dist = Math.Abs(signed);
+                double dist = Math.Abs(plane.Normal.DotProduct(center - plane.Origin));
 
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = w;
-                }
+                if (dist < bestDist) { bestDist = dist; best = w; }
             }
 
             if (best != null)
-            {
                 _logger.Info("Nearest curtain wall chosen: Id=" + best.Id.IntegerValue + ", DistToPlaneFt=" + bestDist.ToString("F6"));
-            }
 
             return best;
         }
 
-        private List<CurtainGridLine> GetAllCurtainGridLines(Document doc, CurtainGrid grid)
+        private List<CurtainGridLine> GetAllCurtainGridLines(CurtainGrid grid)
         {
-            List<CurtainGridLine> result = new List<CurtainGridLine>();
-            if (doc == null || grid == null) return result;
+            var result = new List<CurtainGridLine>();
+            if (grid == null) return result;
 
-            ICollection<ElementId> uIds = grid.GetUGridLineIds();
-            ICollection<ElementId> vIds = grid.GetVGridLineIds();
-
-            if (uIds != null)
+            foreach (ElementId id in grid.GetUGridLineIds() ?? new List<ElementId>())
             {
-                foreach (ElementId id in uIds)
-                {
-                    CurtainGridLine gl = doc.GetElement(id) as CurtainGridLine;
-                    if (gl != null) result.Add(gl);
-                }
+                CurtainGridLine gl = _doc.GetElement(id) as CurtainGridLine;
+                if (gl != null) result.Add(gl);
             }
-
-            if (vIds != null)
+            foreach (ElementId id in grid.GetVGridLineIds() ?? new List<ElementId>())
             {
-                foreach (ElementId id in vIds)
-                {
-                    CurtainGridLine gl = doc.GetElement(id) as CurtainGridLine;
-                    if (gl != null) result.Add(gl);
-                }
+                CurtainGridLine gl = _doc.GetElement(id) as CurtainGridLine;
+                if (gl != null) result.Add(gl);
             }
 
             return result;
@@ -426,97 +480,21 @@ namespace CWPanelsCustomizer
 
         private XYZ GetCurveBottomPoint(Curve curve)
         {
-            if (curve == null) return XYZ.Zero;
-            XYZ p0 = curve.GetEndPoint(0);
-            XYZ p1 = curve.GetEndPoint(1);
+            XYZ p0 = curve.GetEndPoint(0), p1 = curve.GetEndPoint(1);
             return p0.Z <= p1.Z ? p0 : p1;
         }
 
         private XYZ GetCurveTopPoint(Curve curve)
         {
-            if (curve == null) return XYZ.Zero;
-            XYZ p0 = curve.GetEndPoint(0);
-            XYZ p1 = curve.GetEndPoint(1);
+            XYZ p0 = curve.GetEndPoint(0), p1 = curve.GetEndPoint(1);
             return p0.Z >= p1.Z ? p0 : p1;
         }
 
-        private double[] ComputeTopZFromPanels(CurtainGrid grid, List<XYZ> bottomPoints,
-            int[] sortOrder, XYZ wallHorizontal)
+        private XYZ GetCurveDirection(Curve curve)
         {
-            // Собрать topZ всех панелей с их горизонтальной позицией
-            ICollection<ElementId> panelIds = grid.GetPanelIds();
-            var panelTops = new List<KeyValuePair<double, double>>();
-
-            foreach (ElementId pid in panelIds)
-            {
-                Element panel = _doc.GetElement(pid);
-                if (panel == null) continue;
-                BoundingBoxXYZ bb = panel.get_BoundingBox(null);
-                if (bb == null) continue;
-                XYZ center = (bb.Min + bb.Max) * 0.5;
-                panelTops.Add(new KeyValuePair<double, double>(
-                    wallHorizontal.DotProduct(center), bb.Max.Z));
-            }
-
-            _logger.Info("Panel BoundingBoxes collected: " + panelTops.Count + " of " + panelIds.Count + " panels");
-
-            // Горизонтальные позиции линий сетки в порядке сортировки
-            double[] sortedHPos = new double[sortOrder.Length];
-            for (int s = 0; s < sortOrder.Length; s++)
-                sortedHPos[s] = wallHorizontal.DotProduct(bottomPoints[sortOrder[s]]);
-
-            // Для каждой линии найти maxTopZ панелей в соседних колонках
-            double[] sortedTopZ = new double[sortOrder.Length];
-            for (int s = 0; s < sortOrder.Length; s++)
-            {
-                double leftH = s > 0 ? sortedHPos[s - 1] : sortedHPos[s] - 100;
-                double rightH = s < sortOrder.Length - 1 ? sortedHPos[s + 1] : sortedHPos[s] + 100;
-
-                double maxZ = 0;
-                foreach (var kv in panelTops)
-                {
-                    if (kv.Key >= leftH && kv.Key <= rightH)
-                        maxZ = Math.Max(maxZ, kv.Value);
-                }
-                sortedTopZ[s] = maxZ;
-            }
-
-            // Обратная проекция в исходный порядок
-            double[] result = new double[bottomPoints.Count];
-            for (int s = 0; s < sortOrder.Length; s++)
-                result[sortOrder[s]] = sortedTopZ[s];
-
-            return result;
-        }
-
-        private double GetGridLineActualTopZ(CurtainGridLine gridLine)
-        {
-            double maxZ = double.MinValue;
-            try
-            {
-                CurveArray segments = gridLine.AllSegmentCurves;
-                if (segments != null && segments.Size > 0)
-                {
-                    foreach (Curve seg in segments)
-                    {
-                        maxZ = Math.Max(maxZ, Math.Max(seg.GetEndPoint(0).Z, seg.GetEndPoint(1).Z));
-                    }
-                }
-            }
-            catch { /* AllSegmentCurves может бросить исключение */ }
-
-            if (maxZ > double.MinValue) return maxZ;
-
-            // Fallback на FullCurve
-            try
-            {
-                Curve fc = gridLine.FullCurve;
-                if (fc != null)
-                    return Math.Max(fc.GetEndPoint(0).Z, fc.GetEndPoint(1).Z);
-            }
-            catch { }
-
-            return 0;
+            if (curve == null) return XYZ.BasisX;
+            XYZ v = curve.GetEndPoint(1) - curve.GetEndPoint(0);
+            return v.IsZeroLength() ? XYZ.BasisX : v.Normalize();
         }
 
         private double[] SnapTransitionBottomZ(double[] sortedBottomZ)
@@ -562,7 +540,6 @@ namespace CWPanelsCustomizer
             {
                 BoundingBoxXYZ bb = opening.get_BoundingBox(null);
                 if (bb == null) continue;
-
                 LocationPoint locPt = opening.Location as LocationPoint;
                 if (locPt == null) continue;
 
@@ -582,12 +559,8 @@ namespace CWPanelsCustomizer
         {
             var result = new List<double[]>();
             foreach (var opening in allOpenings)
-            {
                 if (Math.Abs(opening[0] - gridLineHPos) <= tolerance)
-                {
                     result.Add(opening);
-                }
-            }
             result.Sort((a, b) => a[1].CompareTo(b[1]));
             return result;
         }
@@ -614,9 +587,7 @@ namespace CWPanelsCustomizer
                 {
                     double segEnd = Math.Min(openingMin, topZ);
                     if (segEnd > currentStart + 0.001)
-                    {
                         segments.Add(new[] { currentStart, segEnd });
-                    }
                 }
 
                 currentStart = Math.Max(currentStart, openingMax - OPENING_TOP_OFFSET_FT);
@@ -624,30 +595,169 @@ namespace CWPanelsCustomizer
             }
 
             if (currentStart < topZ - 0.001)
-            {
                 segments.Add(new[] { currentStart, topZ });
-            }
 
             return segments;
         }
 
-        private XYZ GetCurveDirection(Curve curve)
+        /// <summary>
+        /// Извлекает вертикальные рёбра контура витражной стены.
+        /// Для стен с профилем — из Sketch.Profile, иначе — из LocationCurve + высота.
+        /// Возвращает список [hPosition, zBottom, zTop].
+        /// </summary>
+        private List<double[]> GetWallOutlineVerticalEdges(Wall wall, XYZ wallHorizontal)
         {
-            if (curve == null) return XYZ.BasisX;
+            var edges = new List<double[]>();
 
-            XYZ p0 = curve.GetEndPoint(0);
-            XYZ p1 = curve.GetEndPoint(1);
-            XYZ v = p1 - p0;
+            ICollection<ElementId> depIds = wall.GetDependentElements(
+                new ElementClassFilter(typeof(Sketch)));
 
-            if (v.IsZeroLength()) return XYZ.BasisX;
-            return v.Normalize();
+            List<Curve> outlineCurves = new List<Curve>();
+
+            if (depIds != null && depIds.Count > 0)
+            {
+                foreach (ElementId id in depIds)
+                {
+                    Sketch sketch = _doc.GetElement(id) as Sketch;
+                    if (sketch == null || sketch.Profile == null) continue;
+                    foreach (CurveArray loop in sketch.Profile)
+                        foreach (Curve c in loop)
+                            outlineCurves.Add(c);
+                    if (outlineCurves.Count > 0) break;
+                }
+            }
+
+            _logger.Info("Wall outline curves from Sketch: " + outlineCurves.Count
+                + " (Sketches found: " + (depIds != null ? depIds.Count : 0) + ")");
+
+            if (outlineCurves.Count == 0)
+            {
+                LocationCurve locCurve = wall.Location as LocationCurve;
+                if (locCurve != null)
+                {
+                    Curve baseline = locCurve.Curve;
+                    Parameter heightParam = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM);
+                    Parameter baseOffsetParam = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET);
+                    double height = heightParam != null ? heightParam.AsDouble() : 0;
+                    double baseOffset = baseOffsetParam != null ? baseOffsetParam.AsDouble() : 0;
+
+                    XYZ p0 = baseline.GetEndPoint(0), p1 = baseline.GetEndPoint(1);
+                    double h0 = wallHorizontal.DotProduct(p0), h1 = wallHorizontal.DotProduct(p1);
+                    double zBot = Math.Min(p0.Z, p1.Z) + baseOffset;
+                    double zTop = zBot + height;
+
+                    edges.Add(new[] { Math.Min(h0, h1), zBot, zTop });
+                    edges.Add(new[] { Math.Max(h0, h1), zBot, zTop });
+
+                    _logger.Info("Fallback rectangular outline: left=" + FormatFeetMm(Math.Min(h0, h1))
+                        + " right=" + FormatFeetMm(Math.Max(h0, h1))
+                        + " Z=" + FormatFeetMm(zBot) + ".." + FormatFeetMm(zTop));
+                }
+                return edges;
+            }
+
+            foreach (Curve c in outlineCurves)
+            {
+                if (c == null) continue;
+                XYZ p0 = c.GetEndPoint(0), p1 = c.GetEndPoint(1);
+                if (p0 == null || p1 == null) continue;
+
+                XYZ diff = p1 - p0;
+                if (diff.IsZeroLength()) continue;
+                if (Math.Abs(diff.Normalize().DotProduct(XYZ.BasisZ)) < 0.99) continue;
+
+                double hPos = wallHorizontal.DotProduct((p0 + p1) * 0.5);
+                double zBot = Math.Min(p0.Z, p1.Z);
+                double zTop = Math.Max(p0.Z, p1.Z);
+                if (zTop - zBot < 0.01) continue;
+
+                edges.Add(new[] { hPos, zBot, zTop });
+                _logger.Info("  OutlineCurve: vertical H=" + FormatFeetMm(hPos)
+                    + " Z=" + FormatFeetMm(zBot) + ".." + FormatFeetMm(zTop));
+            }
+
+            _logger.Info("Vertical outline edges found: " + edges.Count);
+            return edges;
+        }
+
+        private double ComputeEdgeMullionHPos(
+            double edgeH, double edgeZBot, double edgeZTop,
+            List<XYZ> gridLineBottomPts, double[] gridLineTopZ, double[] snappedGridZ,
+            XYZ wallHorizontal)
+        {
+            double nearestLeftDist = double.MaxValue;
+            double nearestRightDist = double.MaxValue;
+
+            for (int i = 0; i < gridLineBottomPts.Count; i++)
+            {
+                double gridH = wallHorizontal.DotProduct(gridLineBottomPts[i]);
+                if (gridLineTopZ[i] < edgeZBot + 0.01 || snappedGridZ[i] > edgeZTop - 0.01) continue;
+
+                double dist = gridH - edgeH;
+                if (dist > 0.001 && dist < nearestRightDist) nearestRightDist = dist;
+                else if (dist < -0.001 && Math.Abs(dist) < nearestLeftDist) nearestLeftDist = Math.Abs(dist);
+            }
+
+            return nearestRightDist <= nearestLeftDist ? edgeH + EDGE_OFFSET_FT : edgeH - EDGE_OFFSET_FT;
+        }
+
+        private void TrimGridLineByOutlineEdges(List<double[]> outlineEdges, double gridH,
+            ref double bottomZ, ref double topZ)
+        {
+            const double H_TOLERANCE_FT = 5.0 / FEET_TO_MM;
+
+            foreach (var edge in outlineEdges)
+            {
+                if (Math.Abs(edge[0] - gridH) > H_TOLERANCE_FT) continue;
+
+                double edgeZBot = edge[1], edgeZTop = edge[2];
+
+                if (edgeZBot < bottomZ + 0.01 && edgeZTop > bottomZ + 0.01 && edgeZTop < topZ - 0.01)
+                    bottomZ = edgeZTop + RACK_START_OFFSET_FT;
+
+                if (edgeZBot > bottomZ + 0.01 && edgeZBot < topZ - 0.01 && edgeZTop > topZ - 0.01)
+                    topZ = edgeZBot;
+            }
+        }
+
+        private List<double[]> ExtendOutlineEdgesZ(List<double[]> rawEdges)
+        {
+            const double Z_TOL_FT = 1.0 / FEET_TO_MM;
+            const double H_MERGE_TOL_FT = 1000.0 / FEET_TO_MM;
+
+            var result = new List<double[]>();
+
+            for (int i = 0; i < rawEdges.Count; i++)
+            {
+                double h = rawEdges[i][0], zBot = rawEdges[i][1], zTop = rawEdges[i][2];
+
+                bool found;
+                do
+                {
+                    found = false;
+                    for (int j = 0; j < rawEdges.Count; j++)
+                    {
+                        if (j == i) continue;
+                        if (Math.Abs(rawEdges[j][0] - h) > H_MERGE_TOL_FT) continue;
+                        if (Math.Abs(rawEdges[j][1] - zTop) < Z_TOL_FT && rawEdges[j][2] > zTop + 0.001)
+                        {
+                            zTop = rawEdges[j][2];
+                            found = true;
+                            break;
+                        }
+                    }
+                } while (found);
+
+                result.Add(new[] { h, zBot, zTop });
+            }
+
+            return result;
         }
 
         private XYZ ProjectPointToPlane(XYZ point, Plane plane)
         {
             if (point == null || plane == null) return point;
-            XYZ v = point - plane.Origin;
-            double d = plane.Normal.DotProduct(v);
+            double d = plane.Normal.DotProduct(point - plane.Origin);
             return point - plane.Normal * d;
         }
 
@@ -662,11 +772,7 @@ namespace CWPanelsCustomizer
             if (toDelete.Count == 0) return 0;
 
             using (Transaction t = new Transaction(doc, "Delete existing rack instances"))
-            {
-                t.Start();
-                doc.Delete(toDelete);
-                t.Commit();
-            }
+            { t.Start(); doc.Delete(toDelete); t.Commit(); }
 
             return toDelete.Count;
         }
@@ -686,119 +792,26 @@ namespace CWPanelsCustomizer
             if (toDelete.Count == 0) return 0;
 
             using (Transaction t = new Transaction(doc, "Delete old rack instances"))
-            {
-                t.Start();
-                doc.Delete(toDelete);
-                t.Commit();
-            }
+            { t.Start(); doc.Delete(toDelete); t.Commit(); }
 
             return toDelete.Count;
         }
 
-        private class DuplicateInstancesWarningSuppressor : IFailuresPreprocessor
-        {
-            private readonly RevitLogger _logger;
-
-            public DuplicateInstancesWarningSuppressor(RevitLogger logger)
-            {
-                _logger = logger;
-            }
-
-            public FailureProcessingResult PreprocessFailures(FailuresAccessor failuresAccessor)
-            {
-                IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
-                if (failures == null || failures.Count == 0) return FailureProcessingResult.Continue;
-
-                Dictionary<string, int> warningCounts = new Dictionary<string, int>();
-
-                foreach (FailureMessageAccessor fma in failures)
-                {
-                    if (fma == null) continue;
-
-                    FailureSeverity severity = fma.GetSeverity();
-                    string text = fma.GetDescriptionText() ?? "<no text>";
-
-                    if (severity == FailureSeverity.Warning)
-                    {
-                        failuresAccessor.DeleteWarning(fma);
-                        if (warningCounts.ContainsKey(text))
-                            warningCounts[text]++;
-                        else
-                            warningCounts[text] = 1;
-                    }
-                    else
-                    {
-                        // Ошибки (не warnings) логируем каждую отдельно
-                        _logger.Error("REVIT FAILURE [" + severity + "]: " + text);
-                    }
-                }
-
-                foreach (var kvp in warningCounts)
-                {
-                    _logger.Warn("SUPPRESS WARNING x" + kvp.Value + ": " + kvp.Key);
-                }
-
-                return FailureProcessingResult.Continue;
-            }
-        }
-
         private FamilySymbol FindFamilySymbolByNames(Document doc, string familyName, string symbolName)
         {
-            FilteredElementCollector collector = new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol));
-
-            foreach (FamilySymbol fs in collector)
-            {
+            foreach (FamilySymbol fs in new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol)))
                 if (string.Equals(fs.FamilyName, familyName, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(fs.Name, symbolName, StringComparison.OrdinalIgnoreCase))
-                {
                     return fs;
-                }
-            }
-
             return null;
         }
 
         private bool TrySetParameter(FamilyInstance inst, string paramName, double valueFt)
         {
             Parameter param = inst.LookupParameter(paramName);
-            if (param == null || param.IsReadOnly) return false;
-            if (param.StorageType == StorageType.Double)
-            {
-                param.Set(valueFt);
-                return true;
-            }
-            return false;
-        }
-
-        private void LogInstanceParameters(FamilyInstance inst)
-        {
-            _logger.Info("=== Instance params (Id=" + inst.Id.IntegerValue + ") ===");
-            foreach (Parameter p in inst.Parameters)
-            {
-                if (p == null) continue;
-                string val;
-                switch (p.StorageType)
-                {
-                    case StorageType.Double:
-                        double ft = p.AsDouble();
-                        val = ft.ToString("F4") + "ft (" + (ft * FEET_TO_MM).ToString("F1") + "mm)";
-                        break;
-                    case StorageType.Integer:
-                        val = p.AsInteger().ToString();
-                        break;
-                    case StorageType.String:
-                        val = "'" + (p.AsString() ?? "<null>") + "'";
-                        break;
-                    case StorageType.ElementId:
-                        val = "ElemId=" + p.AsElementId().IntegerValue;
-                        break;
-                    default:
-                        val = "?";
-                        break;
-                }
-                _logger.Info("  '" + p.Definition.Name + "' [" + p.StorageType + "] = " + val
-                    + (p.IsReadOnly ? " (RO)" : ""));
-            }
+            if (param == null || param.IsReadOnly || param.StorageType != StorageType.Double) return false;
+            param.Set(valueFt);
+            return true;
         }
 
         private string FormatXyz(XYZ p)
@@ -810,6 +823,46 @@ namespace CWPanelsCustomizer
         private string FormatFeetMm(double feet)
         {
             return feet.ToString("F4") + "ft (" + (feet * FEET_TO_MM).ToString("F0") + "mm)";
+        }
+
+        #endregion
+
+        private class DuplicateInstancesWarningSuppressor : IFailuresPreprocessor
+        {
+            private readonly RevitLogger _logger;
+
+            public DuplicateInstancesWarningSuppressor(RevitLogger logger) { _logger = logger; }
+
+            public FailureProcessingResult PreprocessFailures(FailuresAccessor failuresAccessor)
+            {
+                IList<FailureMessageAccessor> failures = failuresAccessor.GetFailureMessages();
+                if (failures == null || failures.Count == 0) return FailureProcessingResult.Continue;
+
+                Dictionary<string, int> warningCounts = new Dictionary<string, int>();
+
+                foreach (FailureMessageAccessor fma in failures)
+                {
+                    if (fma == null) continue;
+                    FailureSeverity severity = fma.GetSeverity();
+                    string text = fma.GetDescriptionText() ?? "<no text>";
+
+                    if (severity == FailureSeverity.Warning)
+                    {
+                        failuresAccessor.DeleteWarning(fma);
+                        if (warningCounts.ContainsKey(text)) warningCounts[text]++;
+                        else warningCounts[text] = 1;
+                    }
+                    else
+                    {
+                        _logger.Error("REVIT FAILURE [" + severity + "]: " + text);
+                    }
+                }
+
+                foreach (var kvp in warningCounts)
+                    _logger.Warn("SUPPRESS WARNING x" + kvp.Value + ": " + kvp.Key);
+
+                return FailureProcessingResult.Continue;
+            }
         }
     }
 
