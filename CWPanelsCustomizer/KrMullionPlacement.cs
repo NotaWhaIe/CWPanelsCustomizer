@@ -222,16 +222,13 @@ namespace CWPanelsCustomizer
                         continue;
                     }
 
-                    // FacingOrientation = SP.YVec, HandOrientation = SP.XVec (эмпирически подтверждено).
-                    // Для вертикальной стойки: YVec = горизонтальный (FacingOrientation горизонтальный),
-                    // XVec = (0,0,-1) (HandOrientation вниз → -H = вверх = направление роста Профиль_Длина).
-                    // Математика: для любого горизонтального Normal=(Nx,Ny,0):
-                    //   YVec = (-Ny, Nx, 0) — горизонтальный in-plane
-                    //   XVec = YVec × Normal = (0,0,-1) — всегда!
+                    // Для вертикальной стойки Профиль_Длина растёт вдоль YVec плоскости.
+                    // YVec = (0,0,1) = мировой вертикаль → стойки вертикальные.
+                    // XVec = (-Normal.Y, Normal.X, 0) = горизонталь in-plane, чтобы XVec×YVec=Normal (правосторонняя СК).
+                    // Проверка для всех 4 направлений: Normal=(0,-1,0)→XVec=(1,0,0), (-1,0,0)→(0,-1,0), (0,1,0)→(-1,0,0), (1,0,0)→(0,1,0).
                     XYZ planeNormal = matchingFace.FaceNormal;
-                    XYZ planeYVec = new XYZ(-planeNormal.Y, planeNormal.X, 0.0); // горизонталь in-plane
-                    XYZ planeXVec = new XYZ(0.0, 0.0, -1.0);                     // = planeYVec × Normal всегда
-                    Plane workPlane = Plane.Create(new Frame(matchingFace.Origin, planeXVec, planeYVec, planeNormal));
+                    XYZ planeXVec = new XYZ(-planeNormal.Y, planeNormal.X, 0.0); // горизонталь in-plane
+                    Plane workPlane = Plane.Create(new Frame(matchingFace.Origin, planeXVec, XYZ.BasisZ, planeNormal));
                     SketchPlane sketchPlane = SketchPlane.Create(_doc, workPlane);
                     Plane spActual = sketchPlane.GetPlane();
                     _logger.Info("  WorkPlane: Normal=" + FormatXyz(workPlane.Normal) + " XVec=" + FormatXyz(workPlane.XVec) + " YVec=" + FormatXyz(workPlane.YVec)
