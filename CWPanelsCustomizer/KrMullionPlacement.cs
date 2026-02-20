@@ -245,8 +245,10 @@ namespace CWPanelsCustomizer
                     }
 
                     double gridLineHPos = wallHorizontal.DotProduct(bottomPt);
-                    List<double[]> matchingOpenings = FindOpeningsForGridLine(
-                        openingDataList, gridLineHPos, OPENING_MATCH_TOLERANCE_FT);
+
+                    // Находим проёмы по горизонтальному охвату BB
+                    List<double[]> matchingOpenings = FindOpeningsOverlappingGridLine(
+                        openingDataList, gridLineHPos);
                     List<double[]> freeSegments = GetFreeSegments(bottomZ, topZ, matchingOpenings);
 
                     _logger.Info("GridLine[" + origIdx + "] Id=" + validGridLines[i].Id.IntegerValue
@@ -262,6 +264,63 @@ namespace CWPanelsCustomizer
                                 + " h=" + FormatFeetMm(seg[1] - seg[0]));
 
                     created += PlaceRacksInSegments(freeSegments, bottomPt, workPlane, sketchPlane, symbol, "piece");
+
+                    // --- Боковые стойки у окон ---
+                    // Для линий сетки, не проходящих через центр проёмов
+                    if (matchingOpenings.Count > 0)
+                    {
+                        // Группируем проёмы по горизонтальному центру (одна колонка окон)
+                        var openingGroups = new Dictionary<int, List<double[]>>();
+                        foreach (var op in matchingOpenings)
+                        {
+                            int key = (int)Math.Round(op[0] * FEET_TO_MM);
+                            if (!openingGroups.ContainsKey(key))
+                                openingGroups[key] = new List<double[]>();
+                            openingGroups[key].Add(op);
+                        }
+
+                        foreach (var grp in openingGroups)
+                        {
+                            double oCenter = grp.Value[0][0];
+
+                            // Пропустить если линия сетки проходит через центр проёма
+                            if (Math.Abs(oCenter - gridLineHPos) <= OPENING_MATCH_TOLERANCE_FT)
+                                continue;
+
+                            // Сторона: линия сетки правее или левее центра окна (в h-пространстве)
+                            bool gridIsRight = gridLineHPos > oCenter;
+                            double nearEdge = gridIsRight ? grp.Value[0][4] : grp.Value[0][3]; // hRight : hLeft
+                            double sideH = gridIsRight
+                                ? nearEdge + EDGE_OFFSET_FT
+                                : nearEdge - EDGE_OFFSET_FT;
+
+                            // Базовая точка для боковой стойки
+                            double refH = wallHorizontal.DotProduct(bottomPt);
+                            XYZ sideBasePt = new XYZ(
+                                bottomPt.X + wallHorizontal.X * (sideH - refH),
+                                bottomPt.Y + wallHorizontal.Y * (sideH - refH),
+                                0);
+
+                            _logger.Info("  SideRacks: gridH=" + FormatFeetMm(gridLineHPos)
+                                + " windowCenter=" + FormatFeetMm(oCenter)
+                                + " sideH=" + FormatFeetMm(sideH)
+                                + " openings=" + grp.Value.Count);
+
+                            // Для каждого проёма в группе — отдельный боковой сегмент
+                            var sideSegments = new List<double[]>();
+                            foreach (var op in grp.Value)
+                            {
+                                double sideZBot = op[1]; // opening zMin
+                                double sideZTop = op[2] - OPENING_TOP_OFFSET_FT; // opening zMax - 95мм
+                                if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
+                                sideSegments.Add(new[] { sideZBot, sideZTop });
+                            }
+
+                            if (sideSegments.Count > 0)
+                                created += PlaceRacksInSegments(sideSegments, sideBasePt,
+                                    workPlane, sketchPlane, symbol, "side_piece");
+                        }
+                    }
                 }
 
                 // --- Этап 4: Размещение стоек по краям витража ---
@@ -523,6 +582,10 @@ namespace CWPanelsCustomizer
             return snapped;
         }
 
+        /// <summary>
+        /// Собирает оконные проёмы. Возвращает [hCenter, zMin, zMax, hLeft, hRight].
+        /// hLeft/hRight — горизонтальный охват BoundingBox в координатах wallHorizontal.
+        /// </summary>
         private List<double[]> CollectWindowOpenings(string familyName, XYZ wallHorizontal)
         {
             var result = new List<double[]>();
@@ -544,11 +607,21 @@ namespace CWPanelsCustomizer
                 if (locPt == null) continue;
 
                 double hPos = wallHorizontal.DotProduct(locPt.Point);
-                result.Add(new[] { hPos, bb.Min.Z, bb.Max.Z });
+
+                // Горизонтальный охват из BoundingBox (все 4 угла XY)
+                double h1 = wallHorizontal.X * bb.Min.X + wallHorizontal.Y * bb.Min.Y;
+                double h2 = wallHorizontal.X * bb.Min.X + wallHorizontal.Y * bb.Max.Y;
+                double h3 = wallHorizontal.X * bb.Max.X + wallHorizontal.Y * bb.Min.Y;
+                double h4 = wallHorizontal.X * bb.Max.X + wallHorizontal.Y * bb.Max.Y;
+                double hLeft = Math.Min(Math.Min(h1, h2), Math.Min(h3, h4));
+                double hRight = Math.Max(Math.Max(h1, h2), Math.Max(h3, h4));
+
+                result.Add(new[] { hPos, bb.Min.Z, bb.Max.Z, hLeft, hRight });
 
                 _logger.Info("  Opening Id=" + opening.Id.IntegerValue
                     + " hPos=" + FormatFeetMm(hPos)
-                    + " Z=" + FormatFeetMm(bb.Min.Z) + ".." + FormatFeetMm(bb.Max.Z));
+                    + " Z=" + FormatFeetMm(bb.Min.Z) + ".." + FormatFeetMm(bb.Max.Z)
+                    + " hRange=" + FormatFeetMm(hLeft) + ".." + FormatFeetMm(hRight));
             }
 
             return result;
@@ -561,6 +634,25 @@ namespace CWPanelsCustomizer
             foreach (var opening in allOpenings)
                 if (Math.Abs(opening[0] - gridLineHPos) <= tolerance)
                     result.Add(opening);
+            result.Sort((a, b) => a[1].CompareTo(b[1]));
+            return result;
+        }
+
+        /// <summary>
+        /// Находит проёмы, чей горизонтальный BoundingBox охватывает позицию линии сетки.
+        /// Использует [3]=hLeft, [4]=hRight из CollectWindowOpenings.
+        /// </summary>
+        private List<double[]> FindOpeningsOverlappingGridLine(
+            List<double[]> allOpenings, double gridLineHPos)
+        {
+            var result = new List<double[]>();
+            foreach (var opening in allOpenings)
+            {
+                double hLeft = opening[3];
+                double hRight = opening[4];
+                if (gridLineHPos >= hLeft - 0.001 && gridLineHPos <= hRight + 0.001)
+                    result.Add(opening);
+            }
             result.Sort((a, b) => a[1].CompareTo(b[1]));
             return result;
         }

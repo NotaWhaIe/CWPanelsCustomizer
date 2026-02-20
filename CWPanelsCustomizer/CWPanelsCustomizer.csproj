@@ -87,6 +87,6 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>xcopy /Y /F "$(TargetPath)" "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022"
-if "$(Configuration)"=="Debug" powershell.exe -ExecutionPolicy Bypass -File "$(SolutionDir)revit-reload.ps1"</PostBuildEvent>
+echo %25DATE%25 %25TIME%25 > "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022\reload.trigger"</PostBuildEvent>
   </PropertyGroup>
 </Project>
