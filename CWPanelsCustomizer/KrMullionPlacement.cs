@@ -321,6 +321,12 @@ namespace CWPanelsCustomizer
                 actualTopZ[i] = curve != null ? GetCurveTopPoint(curve).Z : 0;
             }
 
+            // Z-диапазон текущего витража — для фильтрации боковых стоек
+            BoundingBoxXYZ cwBB = targetWall.get_BoundingBox(null);
+            double wallZMin = cwBB != null ? cwBB.Min.Z : double.MinValue;
+            double wallZMax = cwBB != null ? cwBB.Max.Z : double.MaxValue;
+            _logger.Info("  Wall Z range: " + FormatFeetMm(wallZMin) + ".." + FormatFeetMm(wallZMax));
+
             // Проёмы (фильтр по фасаду) и рёбра контура
             const string openingFamilyName = "#_Оконный проем_Прямоугольный";
             List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal, workPlane);
@@ -410,6 +416,10 @@ namespace CWPanelsCustomizer
                         {
                             double sideZBot = op[1];
                             double sideZTop = op[2] - OPENING_TOP_OFFSET_FT;
+                            // Пропустить окно, если его Z-диапазон не пересекается с Z-диапазоном витража.
+                            // Это предотвращает дублирование side_piece, когда два витража на одном фасаде
+                            // (например, основной Z=0..13050 и базовый Z=-1200..0) находят одни и те же окна.
+                            if (sideZBot >= wallZMax - 0.001 || sideZTop <= wallZMin + 0.001) continue;
                             if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
                             sideSegments.Add(new[] { sideZBot, sideZTop });
                         }
