@@ -32,7 +32,6 @@ namespace CWPanelsCustomizer
         private const double EDGE_OFFSET_MM = 150.0;
         private const double EDGE_OFFSET_FT = EDGE_OFFSET_MM / FEET_TO_MM;
 
-        private const int BACKING_WALL_ID = 8091464;
         private const double MAX_FACADE_DIST_FT = 1000.0 / FEET_TO_MM;
 
         private SphereByPoint _sphereByPoint;
@@ -67,26 +66,27 @@ namespace CWPanelsCustomizer
         private void Method()
         {
             Stopwatch sw = Stopwatch.StartNew();
-            _logger.Info("CODE_VERSION: atomic_txn_v1");
+            _logger.Info("CODE_VERSION: auto_backing_wall_v1");
 
-            // --- Опорная стена ---
-            Wall backingWall = _doc.GetElement(new ElementId(BACKING_WALL_ID)) as Wall;
-            if (backingWall == null)
-            {
-                _logger.Error("Backing wall not found. Id=" + BACKING_WALL_ID);
-                throw new InvalidOperationException("Не найдена опорная стена Id=" + BACKING_WALL_ID);
-            }
-            _logger.Info("Backing wall: Id=" + BACKING_WALL_ID + " Name=" + backingWall.Name);
+            // --- Сбор вертикальных граней всех не-витражных стен ---
+            List<Wall> regularWalls = new FilteredElementCollector(_doc)
+                .OfClass(typeof(Wall))
+                .Cast<Wall>()
+                .Where(w => w != null && w.CurtainGrid == null)
+                .ToList();
 
-            List<PlanarFace> backingFaces = GetVerticalPlanarFaces(backingWall);
-            _logger.Info("Backing wall vertical faces: " + backingFaces.Count);
-            foreach (var face in backingFaces)
-                _logger.Info("  Face: Normal=" + FormatXyz(face.FaceNormal) + " Origin=" + FormatXyz(face.Origin));
+            _logger.Info("Regular walls (non-curtain): " + regularWalls.Count);
+
+            List<PlanarFace> backingFaces = new List<PlanarFace>();
+            foreach (Wall w in regularWalls)
+                backingFaces.AddRange(GetVerticalPlanarFaces(w));
+
+            _logger.Info("Candidate vertical faces: " + backingFaces.Count);
 
             if (backingFaces.Count == 0)
             {
-                _logger.Error("No vertical planar faces on backing wall.");
-                throw new InvalidOperationException("У опорной стены не найдено вертикальных граней.");
+                _logger.Error("No vertical planar faces found on any regular wall.");
+                throw new InvalidOperationException("Не найдено вертикальных граней на стенах проекта.");
             }
 
             const string familyName = "КРСТ_НВФ_ZIAS_Стойка с кронштейнами в сборе_В2";
