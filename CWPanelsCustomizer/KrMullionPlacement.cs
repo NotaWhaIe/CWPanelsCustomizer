@@ -384,6 +384,10 @@ namespace CWPanelsCustomizer
             var excludeZones = new List<double[]>();
             foreach (Wall nonNvfWall in nonNvfWalls)
             {
+                // Стены без содержательных панелей (только "Пустая системная панель" и "Системная панель")
+                // не создают зону исключения — иначе они режут стойки рядом с собой.
+                if (!HasSubstantialPanels(nonNvfWall)) continue;
+
                 XYZ nnNormal = GetWallNormal(nonNvfWall);
                 if (nnNormal == null) continue;
                 if (Math.Abs(nnNormal.DotProduct(workPlane.Normal)) < 0.95) continue;
@@ -487,12 +491,6 @@ namespace CWPanelsCustomizer
                             + " sideH=" + FormatFeetMm(sideH)
                             + " openings=" + grp.Value.Count);
 
-                        if (IsHInExcludeZone(excludeZones, sideH))
-                        {
-                            _logger.Info("    SideRacks: skip — sideH in non-НВФ zone");
-                            continue;
-                        }
-
                         var sideSegments = new List<double[]>();
                         foreach (var op in grp.Value)
                         {
@@ -572,6 +570,52 @@ namespace CWPanelsCustomizer
                     + " segments=" + edgeSegments.Count);
 
                 created += PlaceRacksInSegments(edgeSegments, edgeBasePt, workPlane, sketchPlane, symbol, "edge_piece");
+            }
+
+            // --- Этап 5: Боковые стойки по краям зон исключения (не-НВФ витражи) ---
+            // Не-НВФ витраж с содержательными панелями трактуется как проём:
+            // ставятся стойки на 150 мм от его горизонтальных краёв (аналогично оконным).
+            _logger.Info("  === Non-НВФ zone edge racks (Stage 5) ===");
+            foreach (var zone in excludeZones)
+            {
+                double exHMin = zone[0], exHMax = zone[1];
+                double exZMin = zone[2], exZMax = zone[3];
+
+                double sideZBot = exZMin;
+                double sideZTop = exZMax - OPENING_TOP_OFFSET_FT;
+                if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
+
+                foreach (double sideH in new[] { exHMin - EDGE_OFFSET_FT, exHMax + EDGE_OFFSET_FT })
+                {
+                    // Проверяем, что sideH попадает в диапазон текущего НВФ витража
+                    if (sideH < wallHMin - OPENING_MATCH_TOLERANCE_FT
+                        || sideH > wallHMax + OPENING_MATCH_TOLERANCE_FT) continue;
+
+                    // Не ставить если слишком близко к линии сетки
+                    bool tooClose = false;
+                    for (int i = 0; i < bottomPoints.Count; i++)
+                    {
+                        if (Math.Abs(wallHorizontal.DotProduct(bottomPoints[i]) - sideH) < EDGE_OFFSET_FT * 0.5)
+                        { tooClose = true; break; }
+                    }
+                    if (tooClose) continue;
+
+                    XYZ refPt5 = bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin;
+                    double refH5 = wallHorizontal.DotProduct(refPt5);
+                    XYZ sideBasePt5 = new XYZ(
+                        refPt5.X + wallHorizontal.X * (sideH - refH5),
+                        refPt5.Y + wallHorizontal.Y * (sideH - refH5),
+                        0);
+
+                    var sideSegs5 = new List<double[]> { new[] { sideZBot, sideZTop } };
+                    sideSegs5 = SubtractExcludeZones(sideSegs5, GetZExcludesForH(excludeZones, sideH));
+
+                    _logger.Info("    ZoneEdge: H=" + FormatFeetMm(sideH)
+                        + " Z=" + FormatFeetMm(sideZBot) + ".." + FormatFeetMm(sideZTop)
+                        + " segments=" + sideSegs5.Count);
+
+                    created += PlaceRacksInSegments(sideSegs5, sideBasePt5, workPlane, sketchPlane, symbol, "zone_edge");
+                }
             }
 
             return created;
@@ -751,6 +795,32 @@ namespace CWPanelsCustomizer
                 if (fi != null && fi.Symbol != null &&
                     fi.Symbol.FamilyName.StartsWith("КРСТ_НВФ_", StringComparison.OrdinalIgnoreCase))
                     return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Возвращает true, если витраж содержит хотя бы одну содержательную панель
+        /// (не "Пустая системная панель"). Используется для фильтрации зон исключения:
+        /// витражи только с пустыми панелями не должны блокировать размещение стоек.
+        /// </summary>
+        private bool HasSubstantialPanels(Wall curtainWall)
+        {
+            CurtainGrid grid = curtainWall.CurtainGrid;
+            if (grid == null) return false;
+
+            ICollection<ElementId> panelIds = grid.GetPanelIds();
+            if (panelIds == null || panelIds.Count == 0) return false;
+
+            foreach (ElementId panelId in panelIds)
+            {
+                FamilyInstance fi = _doc.GetElement(panelId) as FamilyInstance;
+                if (fi?.Symbol == null) continue;
+                string fn = fi.Symbol.FamilyName;
+                // Пропускаем системные/пустые панели-заглушки
+                if (fn.IndexOf("Пустая", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                if (fn.IndexOf("Системная", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                return true;
             }
             return false;
         }
