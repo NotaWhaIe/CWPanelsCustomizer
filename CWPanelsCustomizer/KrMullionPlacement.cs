@@ -157,6 +157,43 @@ namespace CWPanelsCustomizer
                 {
                     _doc.Delete(allToDelete);
                     _logger.Info("Deleted: " + allToDelete.Count);
+                    _doc.Regenerate(); // обновить граф зависимостей
+                }
+
+                // Удалить накопленные SketchPlane от предыдущих запусков.
+                // SketchPlane.Create(doc, plane) дедуплицирует по Normal+Origin и возвращает
+                // существующий SketchPlane (с неверным XVec), игнорируя новые оси.
+                // После Regenerate() стойки удалены → освободившиеся SketchPlane-ы удаляем.
+                {
+                    var fiFilter = new ElementClassFilter(typeof(FamilyInstance));
+                    List<SketchPlane> verticalSPs = new FilteredElementCollector(_doc)
+                        .OfClass(typeof(SketchPlane))
+                        .Cast<SketchPlane>()
+                        .Where(sp =>
+                        {
+                            Plane p = sp.GetPlane();
+                            double nx = Math.Abs(p.Normal.X), ny = Math.Abs(p.Normal.Y), nz = Math.Abs(p.Normal.Z);
+                            return nz < 0.1 && (Math.Abs(nx - 1.0) < 0.1 || Math.Abs(ny - 1.0) < 0.1);
+                        })
+                        .ToList();
+
+                    int deletedSPs = 0;
+                    foreach (SketchPlane sp in verticalSPs)
+                    {
+                        try
+                        {
+                            // Удаляем только те, у которых нет зависимых FamilyInstance
+                            // (освободились после удаления стоек; Прямоугольный импост пропускаем)
+                            ICollection<ElementId> deps = sp.GetDependentElements(fiFilter);
+                            if (deps.Count == 0)
+                            {
+                                _doc.Delete(sp.Id);
+                                deletedSPs++;
+                            }
+                        }
+                        catch { }
+                    }
+                    _logger.Info("Deleted accumulated SketchPlanes: " + deletedSPs + " of " + verticalSPs.Count + " vertical");
                 }
 
                 if (!symbol.IsActive)
@@ -185,9 +222,20 @@ namespace CWPanelsCustomizer
                         continue;
                     }
 
-                    Plane workPlane = Plane.CreateByNormalAndOrigin(matchingFace.FaceNormal, matchingFace.Origin);
+                    // FacingOrientation = SP.YVec, HandOrientation = SP.XVec (эмпирически подтверждено).
+                    // Для вертикальной стойки: YVec = горизонтальный (FacingOrientation горизонтальный),
+                    // XVec = (0,0,-1) (HandOrientation вниз → -H = вверх = направление роста Профиль_Длина).
+                    // Математика: для любого горизонтального Normal=(Nx,Ny,0):
+                    //   YVec = (-Ny, Nx, 0) — горизонтальный in-plane
+                    //   XVec = YVec × Normal = (0,0,-1) — всегда!
+                    XYZ planeNormal = matchingFace.FaceNormal;
+                    XYZ planeYVec = new XYZ(-planeNormal.Y, planeNormal.X, 0.0); // горизонталь in-plane
+                    XYZ planeXVec = new XYZ(0.0, 0.0, -1.0);                     // = planeYVec × Normal всегда
+                    Plane workPlane = Plane.Create(new Frame(matchingFace.Origin, planeXVec, planeYVec, planeNormal));
                     SketchPlane sketchPlane = SketchPlane.Create(_doc, workPlane);
-                    _logger.Info("  WorkPlane: Normal=" + FormatXyz(workPlane.Normal) + " Origin=" + FormatXyz(workPlane.Origin));
+                    Plane spActual = sketchPlane.GetPlane();
+                    _logger.Info("  WorkPlane: Normal=" + FormatXyz(workPlane.Normal) + " XVec=" + FormatXyz(workPlane.XVec) + " YVec=" + FormatXyz(workPlane.YVec)
+                        + " | SP.XVec=" + FormatXyz(spActual.XVec) + " SP.YVec=" + FormatXyz(spActual.YVec));
 
                     int created = ProcessSingleCurtainWall(curtainWall, workPlane, sketchPlane, symbol);
                     totalCreated += created;
@@ -513,7 +561,9 @@ namespace CWPanelsCustomizer
                         + " Профиль_Длина=" + FormatFeetMm(pieceHeightFt)
                         + pieceTag
                         + (paramSet ? " SET=OK" : " SET=FAIL")
-                        + " Pos=" + FormatXyz(projected));
+                        + " Pos=" + FormatXyz(projected)
+                        + " Orient=F" + FormatXyz(inst.FacingOrientation)
+                        + " H" + FormatXyz(inst.HandOrientation));
 
                     created++;
                     pieceIdx++;
@@ -1038,6 +1088,8 @@ namespace CWPanelsCustomizer
                 if (failures == null || failures.Count == 0) return FailureProcessingResult.Continue;
 
                 Dictionary<string, int> warningCounts = new Dictionary<string, int>();
+                Dictionary<string, int> resolvedCounts = new Dictionary<string, int>();
+                bool hasUnresolved = false;
 
                 foreach (FailureMessageAccessor fma in failures)
                 {
@@ -1051,16 +1103,38 @@ namespace CWPanelsCustomizer
                         if (warningCounts.ContainsKey(text)) warningCounts[text]++;
                         else warningCounts[text] = 1;
                     }
+                    else if (severity == FailureSeverity.Error)
+                    {
+                        // Автоматически применяем "Удаление типа" — то, что Revit предлагает в диалоге.
+                        // Это предотвращает блокирующий диалог "141 Ошибки, 0 Предупреждений".
+                        if (fma.HasResolutionOfType(FailureResolutionType.DeleteElements))
+                        {
+                            fma.SetCurrentResolutionType(FailureResolutionType.DeleteElements);
+                            failuresAccessor.ResolveFailure(fma);
+                            if (resolvedCounts.ContainsKey(text)) resolvedCounts[text]++;
+                            else resolvedCounts[text] = 1;
+                        }
+                        else
+                        {
+                            _logger.Error("REVIT FAILURE [" + severity + "]: " + text);
+                            hasUnresolved = true;
+                        }
+                    }
                     else
                     {
                         _logger.Error("REVIT FAILURE [" + severity + "]: " + text);
+                        hasUnresolved = true;
                     }
                 }
 
                 foreach (var kvp in warningCounts)
                     _logger.Warn("SUPPRESS WARNING x" + kvp.Value + ": " + kvp.Key);
+                foreach (var kvp in resolvedCounts)
+                    _logger.Warn("AUTO-RESOLVED (DeleteElements) x" + kvp.Value + ": " + kvp.Key);
 
-                return FailureProcessingResult.Continue;
+                // ProceedWithCommit — пропустить диалог когда все ошибки обработаны.
+                // Continue — только если есть необработанные ошибки (Revit покажет диалог).
+                return hasUnresolved ? FailureProcessingResult.Continue : FailureProcessingResult.ProceedWithCommit;
             }
         }
     }
