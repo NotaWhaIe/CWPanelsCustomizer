@@ -321,16 +321,46 @@ namespace CWPanelsCustomizer
                 actualTopZ[i] = curve != null ? GetCurveTopPoint(curve).Z : 0;
             }
 
-            // Z-диапазон текущего витража — для фильтрации боковых стоек
+            // 2D-контур витража в плоскости фасада (H и Z) — для фильтрации проёмов
             BoundingBoxXYZ cwBB = targetWall.get_BoundingBox(null);
             double wallZMin = cwBB != null ? cwBB.Min.Z : double.MinValue;
             double wallZMax = cwBB != null ? cwBB.Max.Z : double.MaxValue;
-            _logger.Info("  Wall Z range: " + FormatFeetMm(wallZMin) + ".." + FormatFeetMm(wallZMax));
+            double wallHMin, wallHMax;
+            if (cwBB != null)
+            {
+                double[] hc = {
+                    wallHorizontal.X * cwBB.Min.X + wallHorizontal.Y * cwBB.Min.Y,
+                    wallHorizontal.X * cwBB.Min.X + wallHorizontal.Y * cwBB.Max.Y,
+                    wallHorizontal.X * cwBB.Max.X + wallHorizontal.Y * cwBB.Min.Y,
+                    wallHorizontal.X * cwBB.Max.X + wallHorizontal.Y * cwBB.Max.Y,
+                };
+                wallHMin = hc.Min();
+                wallHMax = hc.Max();
+            }
+            else { wallHMin = double.MinValue; wallHMax = double.MaxValue; }
+            _logger.Info("  Wall Z=" + FormatFeetMm(wallZMin) + ".." + FormatFeetMm(wallZMax)
+                + " H=" + FormatFeetMm(wallHMin) + ".." + FormatFeetMm(wallHMax));
 
             // Проёмы (фильтр по фасаду) и рёбра контура
             const string openingFamilyName = "#_Оконный проем_Прямоугольный";
             List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal, workPlane);
             const double OPENING_MATCH_TOLERANCE_FT = 50.0 / FEET_TO_MM;
+
+            // Фильтр проёмов по 2D-контуру текущего витража (H и Z).
+            // Устраняет ситуацию, когда несколько витражей на одном фасаде претендуют
+            // на одни и те же окна и дублируют боковые стойки.
+            {
+                int before = openingDataList.Count;
+                openingDataList = openingDataList
+                    .Where(op => op[0] >= wallHMin - OPENING_MATCH_TOLERANCE_FT
+                              && op[0] <= wallHMax + OPENING_MATCH_TOLERANCE_FT
+                              && op[1] < wallZMax - 0.001
+                              && op[2] > wallZMin + 0.001)
+                    .ToList();
+                if (openingDataList.Count != before)
+                    _logger.Info("  Openings filtered to wall bounds: " + openingDataList.Count + " (was " + before + ")");
+            }
+
             List<double[]> outlineEdges = GetWallOutlineVerticalEdges(targetWall, wallHorizontal);
 
             // --- Этап 3: Размещение стоек по линиям сетки ---
@@ -416,10 +446,6 @@ namespace CWPanelsCustomizer
                         {
                             double sideZBot = op[1];
                             double sideZTop = op[2] - OPENING_TOP_OFFSET_FT;
-                            // Пропустить окно, если его Z-диапазон не пересекается с Z-диапазоном витража.
-                            // Это предотвращает дублирование side_piece, когда два витража на одном фасаде
-                            // (например, основной Z=0..13050 и базовый Z=-1200..0) находят одни и те же окна.
-                            if (sideZBot >= wallZMax - 0.001 || sideZTop <= wallZMin + 0.001) continue;
                             if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
                             sideSegments.Add(new[] { sideZBot, sideZTop });
                         }
