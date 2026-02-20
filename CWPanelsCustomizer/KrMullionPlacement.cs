@@ -34,6 +34,12 @@ namespace CWPanelsCustomizer
 
         private const double MAX_FACADE_DIST_FT = 1000.0 / FEET_TO_MM;
 
+        // --- Кронштейны (параметры семейства по высоте стойки) ---
+        private const double BRACKET_OFFSET_DEFAULT_MM = 200.0;  // ≥1200 мм
+        private const double BRACKET_OFFSET_SHORT_MM   = 150.0;  // 600–1199 мм
+        private const double BRACKET_STEP_MID_MM       = 600.0;  // 900–1199 мм
+        private const double BRACKET_STEP_SHORT_MM     = 300.0;  // 600–899 мм
+
         private SphereByPoint _sphereByPoint;
         private UIDocument _uidoc;
         private Document _doc;
@@ -552,6 +558,7 @@ namespace CWPanelsCustomizer
                     FamilyInstance inst = _doc.Create.NewFamilyInstance(
                         projected, symbol, sketchPlane, StructuralType.NonStructural);
                     bool paramSet = TrySetParameter(inst, "Профиль_Длина", pieceHeightFt);
+                    SetBracketParams(inst, pieceHeightFt);
 
                     _logger.Info("    " + logPrefix + "[" + pieceIdx + "] Id=" + inst.Id.IntegerValue
                         + " Z=" + FormatFeetMm(currentZ)
@@ -1058,6 +1065,29 @@ namespace CWPanelsCustomizer
             if (param == null || param.IsReadOnly || param.StorageType != StorageType.Double) return false;
             param.Set(valueFt);
             return true;
+        }
+
+        /// <summary>
+        /// Задаёт параметры кронштейнов в зависимости от высоты стойки,
+        /// чтобы предотвратить Кронштейн_Количество=0 и ошибку "Не удалось сформировать тип".
+        /// </summary>
+        private void SetBracketParams(FamilyInstance inst, double heightFt)
+        {
+            double heightMm = heightFt * FEET_TO_MM;
+            if (heightMm >= 1200.0)
+            {
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_DEFAULT_MM / FEET_TO_MM);
+            }
+            else if (heightMm >= 900.0)
+            {
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_MM / FEET_TO_MM);
+                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_MID_MM / FEET_TO_MM);
+            }
+            else if (heightMm >= 600.0)
+            {
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_MM / FEET_TO_MM);
+                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_SHORT_MM / FEET_TO_MM);
+            }
         }
 
         private string FormatXyz(XYZ p)
