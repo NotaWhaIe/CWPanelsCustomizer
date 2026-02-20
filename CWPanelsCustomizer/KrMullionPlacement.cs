@@ -155,7 +155,8 @@ namespace CWPanelsCustomizer
                 t.Start();
 
                 FailureHandlingOptions fho = t.GetFailureHandlingOptions();
-                fho.SetFailuresPreprocessor(new DuplicateInstancesWarningSuppressor(_logger));
+                var suppressor = new DuplicateInstancesWarningSuppressor(_logger);
+                fho.SetFailuresPreprocessor(suppressor);
                 t.SetFailureHandlingOptions(fho);
 
                 // Шаг 1: удалить существующие стойки перед размещением
@@ -248,6 +249,16 @@ namespace CWPanelsCustomizer
 
                 _logger.LogSummary("Placement result", ("Deleted", allToDelete.Count), ("Created", totalCreated), ("Facades", processedCount));
                 t.Commit();
+
+                // Если после размещения есть дубли — выделить их в UI для ревью
+                List<ElementId> dupeIds = suppressor.WarningElementIds
+                    .Distinct()
+                    .ToList();
+                if (dupeIds.Count > 0)
+                {
+                    _uidoc.Selection.SetElementIds(dupeIds);
+                    _logger.Warn("DUPLICATES SELECTED in UI: " + dupeIds.Count + " elements — review required");
+                }
             }
 
             sw.Stop();
@@ -1143,6 +1154,9 @@ namespace CWPanelsCustomizer
         {
             private readonly RevitLogger _logger;
 
+            /// <summary>Id всех элементов, задействованных в предупреждениях (дубли и т.п.).</summary>
+            public List<ElementId> WarningElementIds { get; } = new List<ElementId>();
+
             public DuplicateInstancesWarningSuppressor(RevitLogger logger) { _logger = logger; }
 
             public FailureProcessingResult PreprocessFailures(FailuresAccessor failuresAccessor)
@@ -1162,6 +1176,11 @@ namespace CWPanelsCustomizer
 
                     if (severity == FailureSeverity.Warning)
                     {
+                        // Собираем Id только для предупреждений о дублях по позиции
+                        if (text.IndexOf("идентичн", StringComparison.OrdinalIgnoreCase) >= 0
+                            || text.IndexOf("identical", StringComparison.OrdinalIgnoreCase) >= 0)
+                            WarningElementIds.AddRange(fma.GetFailingElementIds());
+
                         failuresAccessor.DeleteWarning(fma);
                         if (warningCounts.ContainsKey(text)) warningCounts[text]++;
                         else warningCounts[text] = 1;
