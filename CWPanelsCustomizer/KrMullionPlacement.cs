@@ -119,6 +119,10 @@ namespace CWPanelsCustomizer
             List<Wall> nvfCurtainWalls = allCurtainWalls.Where(HasNvfPanels).ToList();
             _logger.Info("CurtainWalls with КРСТ_НВФ_ panels: " + nvfCurtainWalls.Count);
 
+            // Не-НВФ витражи — зоны исключения (стойки в их контурах не размещаются)
+            List<Wall> nonNvfCurtainWalls = allCurtainWalls.Except(nvfCurtainWalls).ToList();
+            _logger.Info("CurtainWalls without КРСТ_НВФ_ (exclude zones): " + nonNvfCurtainWalls.Count);
+
             if (nvfCurtainWalls.Count == 0)
             {
                 _logger.Warn("No curtain walls with КРСТ_НВФ_ panels found.");
@@ -241,7 +245,7 @@ namespace CWPanelsCustomizer
                     _logger.Info("  WorkPlane: Normal=" + FormatXyz(workPlane.Normal) + " XVec=" + FormatXyz(workPlane.XVec) + " YVec=" + FormatXyz(workPlane.YVec)
                         + " | SP.XVec=" + FormatXyz(spActual.XVec) + " SP.YVec=" + FormatXyz(spActual.YVec));
 
-                    int created = ProcessSingleCurtainWall(curtainWall, workPlane, sketchPlane, symbol);
+                    int created = ProcessSingleCurtainWall(curtainWall, workPlane, sketchPlane, symbol, nonNvfCurtainWalls);
                     totalCreated += created;
                     if (created > 0) processedCount++;
                     _logger.Info("  Subtotal created: " + created);
@@ -265,7 +269,7 @@ namespace CWPanelsCustomizer
             _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
         }
 
-        private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol)
+        private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, List<Wall> nonNvfWalls)
         {
             CurtainGrid curtainGrid = targetWall.CurtainGrid;
             if (curtainGrid == null) return 0;
@@ -374,6 +378,36 @@ namespace CWPanelsCustomizer
 
             List<double[]> outlineEdges = GetWallOutlineVerticalEdges(targetWall, wallHorizontal);
 
+            // Зоны исключения: не-НВФ витражи на том же фасаде.
+            // Стойки не размещаются в контурах витражей без КРСТ_НВФ_ панелей.
+            // Формат: [hMin, hMax, zMin, zMax] в координатах фасада.
+            var excludeZones = new List<double[]>();
+            foreach (Wall nonNvfWall in nonNvfWalls)
+            {
+                XYZ nnNormal = GetWallNormal(nonNvfWall);
+                if (nnNormal == null) continue;
+                if (Math.Abs(nnNormal.DotProduct(workPlane.Normal)) < 0.95) continue;
+
+                XYZ nnCenter = GetWallBBCenter(nonNvfWall);
+                double nnDist = Math.Abs(workPlane.Normal.DotProduct(nnCenter - workPlane.Origin));
+                if (nnDist > MAX_FACADE_DIST_FT) continue;
+
+                BoundingBoxXYZ nnBB = nonNvfWall.get_BoundingBox(null);
+                if (nnBB == null) continue;
+
+                double[] hc = {
+                    wallHorizontal.X * nnBB.Min.X + wallHorizontal.Y * nnBB.Min.Y,
+                    wallHorizontal.X * nnBB.Min.X + wallHorizontal.Y * nnBB.Max.Y,
+                    wallHorizontal.X * nnBB.Max.X + wallHorizontal.Y * nnBB.Min.Y,
+                    wallHorizontal.X * nnBB.Max.X + wallHorizontal.Y * nnBB.Max.Y,
+                };
+                double exHMin = hc.Min(), exHMax = hc.Max();
+                excludeZones.Add(new[] { exHMin, exHMax, nnBB.Min.Z, nnBB.Max.Z });
+                _logger.Info("  ExcludeZone non-НВФ Id=" + nonNvfWall.Id.IntegerValue
+                    + " H=" + FormatFeetMm(exHMin) + ".." + FormatFeetMm(exHMax)
+                    + " Z=" + FormatFeetMm(nnBB.Min.Z) + ".." + FormatFeetMm(nnBB.Max.Z));
+            }
+
             // --- Этап 3: Размещение стоек по линиям сетки ---
             int created = 0;
 
@@ -401,6 +435,7 @@ namespace CWPanelsCustomizer
                 List<double[]> matchingOpenings = FindOpeningsOverlappingGridLine(
                     openingDataList, gridLineHPos);
                 List<double[]> freeSegments = GetFreeSegments(bottomZ, topZ, matchingOpenings);
+                freeSegments = SubtractExcludeZones(freeSegments, GetZExcludesForH(excludeZones, gridLineHPos));
 
                 _logger.Info("  GridLine[" + origIdx + "] Id=" + validGridLines[i].Id.IntegerValue
                     + snapInfo
@@ -451,6 +486,12 @@ namespace CWPanelsCustomizer
                             + " windowCenter=" + FormatFeetMm(oCenter)
                             + " sideH=" + FormatFeetMm(sideH)
                             + " openings=" + grp.Value.Count);
+
+                        if (IsHInExcludeZone(excludeZones, sideH))
+                        {
+                            _logger.Info("    SideRacks: skip — sideH in non-НВФ zone");
+                            continue;
+                        }
 
                         var sideSegments = new List<double[]>();
                         foreach (var op in grp.Value)
@@ -523,6 +564,7 @@ namespace CWPanelsCustomizer
                 List<double[]> edgeOpenings = FindOpeningsForGridLine(
                     openingDataList, mullionH, OPENING_MATCH_TOLERANCE_FT);
                 List<double[]> edgeSegments = GetFreeSegments(edgeBottomZ, edgeTopZ, edgeOpenings);
+                edgeSegments = SubtractExcludeZones(edgeSegments, GetZExcludesForH(excludeZones, mullionH));
 
                 _logger.Info("    EdgeMullion: H=" + FormatFeetMm(mullionH)
                     + " Z=" + FormatFeetMm(edgeBottomZ) + ".." + FormatFeetMm(edgeTopZ)
@@ -1051,6 +1093,49 @@ namespace CWPanelsCustomizer
                 result.Add(new[] { h, zBot, zTop });
             }
 
+            return result;
+        }
+
+        /// <summary>Возвращает Z-диапазоны [zMin, zMax] зон исключения, чья H-полоса содержит h.</summary>
+        private List<double[]> GetZExcludesForH(List<double[]> excludeZones, double h)
+        {
+            var result = new List<double[]>();
+            foreach (var z in excludeZones)
+                if (h >= z[0] - 0.001 && h <= z[1] + 0.001)
+                    result.Add(new[] { z[2], z[3] });
+            return result;
+        }
+
+        /// <summary>Возвращает true, если h попадает в H-полосу хотя бы одной зоны исключения.</summary>
+        private bool IsHInExcludeZone(List<double[]> excludeZones, double h)
+        {
+            foreach (var z in excludeZones)
+                if (h >= z[0] - 0.001 && h <= z[1] + 0.001)
+                    return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Вычитает жёсткие Z-зоны исключения [zMin, zMax] из сегментов.
+        /// В отличие от GetFreeSegments, зазор OPENING_TOP_OFFSET не применяется —
+        /// зоны вычитаются точно.
+        /// </summary>
+        private List<double[]> SubtractExcludeZones(List<double[]> segments, List<double[]> zExcludes)
+        {
+            if (zExcludes.Count == 0) return segments;
+            var result = new List<double[]>(segments);
+            foreach (var ex in zExcludes)
+            {
+                double exMin = ex[0], exMax = ex[1];
+                var next = new List<double[]>();
+                foreach (var seg in result)
+                {
+                    if (exMax <= seg[0] + 0.001 || exMin >= seg[1] - 0.001) { next.Add(seg); continue; }
+                    if (seg[0] < exMin - 0.001) next.Add(new[] { seg[0], exMin });
+                    if (seg[1] > exMax + 0.001) next.Add(new[] { exMax, seg[1] });
+                }
+                result = next;
+            }
             return result;
         }
 
