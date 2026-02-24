@@ -307,7 +307,8 @@ namespace CWPanelsCustomizer
                 .ToList();
 
             _logger.Info("  Vertical grid lines: " + verticalGridLines.Count);
-            if (verticalGridLines.Count == 0) return 0;
+            if (verticalGridLines.Count == 0)
+                _logger.Info("  No grid lines — single-panel wall, proceeding to edge racks only");
 
             // --- Этап 1: Сбор данных линий сетки ---
             List<int> origIndices = new List<int>();
@@ -544,7 +545,8 @@ namespace CWPanelsCustomizer
 
                 double mullionH = ComputeEdgeMullionHPos(
                     edgeH, edgeZBot, edgeZTop,
-                    bottomPoints, actualTopZ, snappedZ, wallHorizontal);
+                    bottomPoints, actualTopZ, snappedZ, wallHorizontal,
+                    (wallHMin + wallHMax) * 0.5);
 
                 bool tooCloseToGrid = false;
                 for (int i = 0; i < bottomPoints.Count; i++)
@@ -567,7 +569,7 @@ namespace CWPanelsCustomizer
                 double edgeBottomZ = edgeZBot + RACK_START_OFFSET_FT;
                 double edgeTopZ = edgeZTop;
 
-                if (edgeTopZ - edgeBottomZ < RACK_MIN_HEIGHT_FT - 0.001)
+                if (edgeTopZ - edgeBottomZ < RACK_MIN_HEIGHT_FT * 0.5 - 0.001)
                 {
                     _logger.Info("    Skip: height too small (" + FormatFeetMm(edgeTopZ - edgeBottomZ) + ")");
                     continue;
@@ -729,6 +731,49 @@ namespace CWPanelsCustomizer
             }
 
             _logger.Info("  Gap fill: " + gapIter + " positions added");
+
+            // --- Диагностика покрытия НВФ-панелей ---
+            // Для каждой КРСТ_НВФ_ панели проверяем, попадает ли хотя бы одна колонка стоек
+            // в её горизонтальный диапазон [hLeft, hRight]. Логируем непокрытые панели.
+            {
+                CurtainGrid cg2 = targetWall.CurtainGrid;
+                ICollection<ElementId> panelIds = cg2?.GetPanelIds();
+                if (panelIds != null)
+                {
+                    foreach (ElementId pid in panelIds)
+                    {
+                        FamilyInstance panel = _doc.GetElement(pid) as FamilyInstance;
+                        if (panel?.Symbol == null) continue;
+                        if (!panel.Symbol.FamilyName.StartsWith("КРСТ_НВФ_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        BoundingBoxXYZ pbb = panel.get_BoundingBox(null);
+                        if (pbb == null) continue;
+
+                        double[] hc2 = {
+                            wallHorizontal.X * pbb.Min.X + wallHorizontal.Y * pbb.Min.Y,
+                            wallHorizontal.X * pbb.Min.X + wallHorizontal.Y * pbb.Max.Y,
+                            wallHorizontal.X * pbb.Max.X + wallHorizontal.Y * pbb.Min.Y,
+                            wallHorizontal.X * pbb.Max.X + wallHorizontal.Y * pbb.Max.Y,
+                        };
+                        double pHL = hc2.Min(), pHR = hc2.Max();
+                        double pHC = (pHL + pHR) * 0.5;
+
+                        bool covered = false;
+                        double closestDist = double.MaxValue;
+                        foreach (var col in rackColumns)
+                        {
+                            double d = Math.Abs(col[0] - pHC);
+                            if (d < closestDist) closestDist = d;
+                            if (col[0] >= pHL - 0.001 && col[0] <= pHR + 0.001) { covered = true; break; }
+                        }
+
+                        if (!covered)
+                            _logger.Warn("  UNCOVERED panel Id=" + pid.IntegerValue
+                                + " H=" + FormatFeetMm(pHL) + ".." + FormatFeetMm(pHR)
+                                + " closestRack=" + FormatFeetMm(closestDist));
+                    }
+                }
+            }
 
             // Передаём позиции этого витража в общий список фасада для snap следующих витражей
             sharedFacadeColumns.AddRange(rackColumns);
@@ -1210,7 +1255,7 @@ namespace CWPanelsCustomizer
         private double ComputeEdgeMullionHPos(
             double edgeH, double edgeZBot, double edgeZTop,
             List<XYZ> gridLineBottomPts, double[] gridLineTopZ, double[] snappedGridZ,
-            XYZ wallHorizontal)
+            XYZ wallHorizontal, double wallHCenter)
         {
             double nearestLeftDist = double.MaxValue;
             double nearestRightDist = double.MaxValue;
@@ -1224,6 +1269,10 @@ namespace CWPanelsCustomizer
                 if (dist > 0.001 && dist < nearestRightDist) nearestRightDist = dist;
                 else if (dist < -0.001 && Math.Abs(dist) < nearestLeftDist) nearestLeftDist = Math.Abs(dist);
             }
+
+            // Нет линий сетки (одна панель) — определяем направление по центру стены
+            if (nearestRightDist >= double.MaxValue / 2 && nearestLeftDist >= double.MaxValue / 2)
+                return edgeH < wallHCenter ? edgeH + EDGE_OFFSET_FT : edgeH - EDGE_OFFSET_FT;
 
             return nearestRightDist <= nearestLeftDist ? edgeH + EDGE_OFFSET_FT : edgeH - EDGE_OFFSET_FT;
         }
