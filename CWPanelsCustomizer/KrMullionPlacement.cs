@@ -13,7 +13,7 @@ namespace CWPanelsCustomizer
     [Transaction(TransactionMode.Manual)]
     public class KrMullionPlacement : IExternalCommand
     {
-        public static string IS_TAB_NAME => "BIM";
+        public static string IS_TAB_NAME => "КР";
         public static string IS_NAME => "Разместить стойки по витражу";
         public static string IS_DESCRIPTION => "Размещение семейства стоек по вертикальным линиям витража на поверхности стены";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
@@ -264,6 +264,11 @@ namespace CWPanelsCustomizer
 
             sw.Stop();
             _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
+
+            TaskDialog.Show(IS_NAME,
+                "Создано: " + totalCreated + " стоек\n" +
+                "Фасадов: " + processedCount + "\n" +
+                "Время: " + (sw.ElapsedMilliseconds / 1000.0).ToString("F1") + " сек");
         }
 
         private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, List<Wall> nonNvfWalls)
@@ -411,6 +416,8 @@ namespace CWPanelsCustomizer
 
             // --- Этап 3: Размещение стоек по линиям сетки ---
             int created = 0;
+            // [H, X, Y, BottomZ, TopZ] — все позиции размещённых колонок стоек для этапа 6
+            var rackColumns = new List<double[]>();
 
             for (int i = 0; i < validGridLines.Count; i++)
             {
@@ -450,6 +457,7 @@ namespace CWPanelsCustomizer
                         _logger.Info("      FreeSegment: " + FormatFeetMm(seg[0]) + ".." + FormatFeetMm(seg[1])
                             + " h=" + FormatFeetMm(seg[1] - seg[0]));
 
+                rackColumns.Add(new[] { gridLineHPos, bottomPt.X, bottomPt.Y, bottomZ, topZ });
                 created += PlaceRacksInSegments(freeSegments, bottomPt, workPlane, sketchPlane, symbol, "piece");
 
                 // --- Боковые стойки у окон ---
@@ -498,8 +506,13 @@ namespace CWPanelsCustomizer
                         }
 
                         if (sideSegments.Count > 0)
+                        {
+                            double sideColBot = sideSegments.Min(s => s[0]);
+                            double sideColTop = sideSegments.Max(s => s[1]);
+                            rackColumns.Add(new[] { sideH, sideBasePt.X, sideBasePt.Y, sideColBot, sideColTop });
                             created += PlaceRacksInSegments(sideSegments, sideBasePt,
                                 workPlane, sketchPlane, symbol, "side_piece");
+                        }
                     }
                 }
             }
@@ -566,6 +579,7 @@ namespace CWPanelsCustomizer
                     + " openings=" + edgeOpenings.Count
                     + " segments=" + edgeSegments.Count);
 
+                rackColumns.Add(new[] { mullionH, edgeBasePt.X, edgeBasePt.Y, edgeBottomZ, edgeTopZ });
                 created += PlaceRacksInSegments(edgeSegments, edgeBasePt, workPlane, sketchPlane, symbol, "edge_piece");
             }
 
@@ -611,9 +625,67 @@ namespace CWPanelsCustomizer
                         + " Z=" + FormatFeetMm(sideZBot) + ".." + FormatFeetMm(sideZTop)
                         + " segments=" + sideSegs5.Count);
 
+                    rackColumns.Add(new[] { sideH, sideBasePt5.X, sideBasePt5.Y, sideZBot, sideZTop });
                     created += PlaceRacksInSegments(sideSegs5, sideBasePt5, workPlane, sketchPlane, symbol, "zone_edge");
                 }
             }
+
+            // --- Этап 6: Заполнение промежутков > 600 мм между стойками ---
+            // Если в плоскости XY расстояние между двумя соседними колонками стоек > 600 мм,
+            // добавляем стойку посередине. Повторяем до тех пор, пока все промежутки ≤ 600 мм.
+            const double GAP_FILL_MAX_FT = 600.0 / FEET_TO_MM;
+            _logger.Info("  === Gap filling (max 600mm between racks) ===");
+
+            rackColumns.Sort((a, b) => a[0].CompareTo(b[0]));
+
+            // Дедупликация: убрать позиции ближе 5 мм друг к другу
+            for (int k = rackColumns.Count - 1; k > 0; k--)
+                if (Math.Abs(rackColumns[k][0] - rackColumns[k - 1][0]) < 5.0 / FEET_TO_MM)
+                    rackColumns.RemoveAt(k);
+
+            int gapIter = 0;
+            const int GAP_MAX_ITER = 2000;
+            bool gapFound = true;
+            while (gapFound && gapIter < GAP_MAX_ITER)
+            {
+                gapFound = false;
+                for (int i = 0; i < rackColumns.Count - 1; i++)
+                {
+                    double gap = rackColumns[i + 1][0] - rackColumns[i][0];
+                    if (gap <= GAP_FILL_MAX_FT + 0.001) continue;
+
+                    double midH = (rackColumns[i][0] + rackColumns[i + 1][0]) * 0.5;
+                    double dH = midH - rackColumns[i][0];
+                    XYZ leftPt = new XYZ(rackColumns[i][1], rackColumns[i][2], 0);
+                    XYZ midBasePt = new XYZ(
+                        leftPt.X + wallHorizontal.X * dH,
+                        leftPt.Y + wallHorizontal.Y * dH,
+                        0);
+
+                    double midBotZ = Math.Min(rackColumns[i][3], rackColumns[i + 1][3]);
+                    double midTopZ = Math.Max(rackColumns[i][4], rackColumns[i + 1][4]);
+
+                    TrimGridLineByOutlineEdges(outlineEdges, midH, ref midBotZ, ref midTopZ);
+
+                    List<double[]> gapOpenings = FindOpeningsOverlappingGridLine(openingDataList, midH);
+                    List<double[]> gapSegments = GetFreeSegments(midBotZ, midTopZ, gapOpenings);
+                    gapSegments = SubtractExcludeZones(gapSegments, GetZExcludesForH(excludeZones, midH));
+
+                    _logger.Info("    GapFill[" + gapIter + "]: H=" + FormatFeetMm(midH)
+                        + " gap=" + FormatFeetMm(gap)
+                        + " Z=" + FormatFeetMm(midBotZ) + ".." + FormatFeetMm(midTopZ)
+                        + " openings=" + gapOpenings.Count
+                        + " segments=" + gapSegments.Count);
+
+                    created += PlaceRacksInSegments(gapSegments, midBasePt, workPlane, sketchPlane, symbol, "gap_fill");
+                    rackColumns.Insert(i + 1, new[] { midH, midBasePt.X, midBasePt.Y, midBotZ, midTopZ });
+                    gapFound = true;
+                    gapIter++;
+                    break;
+                }
+            }
+
+            _logger.Info("  Gap fill: " + gapIter + " positions added");
 
             return created;
         }
