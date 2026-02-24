@@ -40,7 +40,6 @@ namespace CWPanelsCustomizer
         private const double BRACKET_STEP_MID_MM       = 600.0;  // 900–1199 мм
         private const double BRACKET_STEP_SHORT_MM     = 300.0;  // 600–899 мм
 
-        private SphereByPoint _sphereByPoint;
         private UIDocument _uidoc;
         private Document _doc;
         private RevitLogger _logger;
@@ -49,8 +48,6 @@ namespace CWPanelsCustomizer
         {
             _uidoc = commandData.Application.ActiveUIDocument;
             _doc = _uidoc.Document;
-            _sphereByPoint = new SphereByPoint(_doc);
-
             _logger = RevitLogger.GetLogger(_doc);
             _logger.BeginSession(IS_NAME, _doc.Title);
 
@@ -1176,15 +1173,6 @@ namespace CWPanelsCustomizer
             return result;
         }
 
-        /// <summary>Возвращает true, если h попадает в H-полосу хотя бы одной зоны исключения.</summary>
-        private bool IsHInExcludeZone(List<double[]> excludeZones, double h)
-        {
-            foreach (var z in excludeZones)
-                if (h >= z[0] - 0.001 && h <= z[1] + 0.001)
-                    return true;
-            return false;
-        }
-
         /// <summary>
         /// Вычитает жёсткие Z-зоны исключения [zMin, zMax] из сегментов.
         /// В отличие от GetFreeSegments, зазор OPENING_TOP_OFFSET не применяется —
@@ -1214,42 +1202,6 @@ namespace CWPanelsCustomizer
             if (point == null || plane == null) return point;
             double d = plane.Normal.DotProduct(point - plane.Origin);
             return point - plane.Normal * d;
-        }
-
-        private int DeleteExistingInstances(Document doc, FamilySymbol symbol)
-        {
-            if (doc == null || symbol == null) return 0;
-
-            ICollection<ElementId> toDelete = new FilteredElementCollector(doc)
-                .WherePasses(new FamilyInstanceFilter(doc, symbol.Id))
-                .ToElementIds();
-
-            if (toDelete.Count == 0) return 0;
-
-            using (Transaction t = new Transaction(doc, "Delete existing rack instances"))
-            { t.Start(); doc.Delete(toDelete); t.Commit(); }
-
-            return toDelete.Count;
-        }
-
-        private int DeleteExistingInstancesByFamilyName(Document doc, string familyName)
-        {
-            if (doc == null || string.IsNullOrEmpty(familyName)) return 0;
-
-            List<ElementId> toDelete = new FilteredElementCollector(doc)
-                .OfClass(typeof(FamilyInstance))
-                .Cast<FamilyInstance>()
-                .Where(fi => fi.Symbol != null &&
-                    string.Equals(fi.Symbol.FamilyName, familyName, StringComparison.OrdinalIgnoreCase))
-                .Select(fi => fi.Id)
-                .ToList();
-
-            if (toDelete.Count == 0) return 0;
-
-            using (Transaction t = new Transaction(doc, "Delete old rack instances"))
-            { t.Start(); doc.Delete(toDelete); t.Commit(); }
-
-            return toDelete.Count;
         }
 
         private FamilySymbol FindFamilySymbolByNames(Document doc, string familyName, string symbolName)
