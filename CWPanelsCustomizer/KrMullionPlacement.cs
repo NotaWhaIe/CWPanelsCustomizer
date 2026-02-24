@@ -13,24 +13,33 @@ namespace CWPanelsCustomizer
     [Transaction(TransactionMode.Manual)]
     public class KrMullionPlacement : IExternalCommand
     {
-        public static string IS_TAB_NAME => "КР";
+        public static string IS_TAB_NAME => "КР";//
         public static string IS_NAME => "Разместить стойки по витражу";
         public static string IS_DESCRIPTION => "Размещение семейства стоек по вертикальным линиям витража на поверхности стены";
         public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
 
         private const double FEET_TO_MM = 304.8;
-        private const double RACK_HEIGHT_MM = 3000.0;
-        private const double RACK_HEIGHT_FT = RACK_HEIGHT_MM / FEET_TO_MM;
-        private const double RACK_GAP_MM = 10.0;
-        private const double RACK_GAP_FT = RACK_GAP_MM / FEET_TO_MM;
-        private const double RACK_START_OFFSET_MM = 5.0;
-        private const double RACK_START_OFFSET_FT = RACK_START_OFFSET_MM / FEET_TO_MM;
-        private const double RACK_MIN_HEIGHT_MM = 1200.0;
-        private const double RACK_MIN_HEIGHT_FT = RACK_MIN_HEIGHT_MM / FEET_TO_MM;
-        private const double OPENING_TOP_OFFSET_MM = 95.0;
+
+        // ┌─────────────────────────────────────────────────────────────┐
+        // │           ТРЕБОВАНИЯ ПО РАЗМЕЩЕНИЮ СТОЕК                   │
+        // └─────────────────────────────────────────────────────────────┘
+        private const double RACK_HEIGHT_MM        = 3000.0; // Номинальная высота стойки
+        private const double RACK_HEIGHT_FT        = RACK_HEIGHT_MM / FEET_TO_MM;
+        private const double RACK_GAP_MM           = 10.0;   // Зазор между стойками по вертикали
+        private const double RACK_GAP_FT           = RACK_GAP_MM / FEET_TO_MM;
+        private const double RACK_START_OFFSET_MM  = 5.0;    // Отступ низа первой стойки от низа витража
+        private const double RACK_START_OFFSET_FT  = RACK_START_OFFSET_MM / FEET_TO_MM;
+        private const double RACK_MIN_HEIGHT_MM    = 1200.0; // Минимально допустимая высота стойки
+        private const double RACK_MIN_HEIGHT_FT    = RACK_MIN_HEIGHT_MM / FEET_TO_MM;
+        private const double OPENING_TOP_OFFSET_MM = 95.0;   // Отступ от верха проёма окна
         private const double OPENING_TOP_OFFSET_FT = OPENING_TOP_OFFSET_MM / FEET_TO_MM;
-        private const double EDGE_OFFSET_MM = 150.0;
-        private const double EDGE_OFFSET_FT = EDGE_OFFSET_MM / FEET_TO_MM;
+        private const double EDGE_OFFSET_MM        = 150.0;  // Отступ боковой стойки от края проёма/витража
+        private const double EDGE_OFFSET_FT        = EDGE_OFFSET_MM / FEET_TO_MM;
+        private const double GAP_FILL_MAX_MM       = 600.0;  // Максимально допустимый шаг между стойками в плане
+        private const double GAP_FILL_MAX_FT       = GAP_FILL_MAX_MM / FEET_TO_MM;
+        private const double COLUMN_SNAP_DIST_MM   = 140.0;  // Стойки ближе этого → на одну вертикаль
+        private const double COLUMN_SNAP_DIST_FT   = COLUMN_SNAP_DIST_MM / FEET_TO_MM;
+        // └─────────────────────────────────────────────────────────────┘
 
         private const double MAX_FACADE_DIST_FT = 1000.0 / FEET_TO_MM;
 
@@ -149,6 +158,8 @@ namespace CWPanelsCustomizer
 
             int totalCreated = 0;
             int processedCount = 0;
+            // Накопленные H-позиции стоек по всем витражам одного фасада — для cross-wall snap
+            var sharedFacadeColumns = new List<double[]>();
 
             // --- Единая транзакция: сначала удаление, затем размещение ---
             using (Transaction t = new Transaction(_doc, IS_NAME))
@@ -242,7 +253,7 @@ namespace CWPanelsCustomizer
                     _logger.Info("  WorkPlane: Normal=" + FormatXyz(workPlane.Normal) + " XVec=" + FormatXyz(workPlane.XVec) + " YVec=" + FormatXyz(workPlane.YVec)
                         + " | SP.XVec=" + FormatXyz(spActual.XVec) + " SP.YVec=" + FormatXyz(spActual.YVec));
 
-                    int created = ProcessSingleCurtainWall(curtainWall, workPlane, sketchPlane, symbol, nonNvfCurtainWalls);
+                    int created = ProcessSingleCurtainWall(curtainWall, workPlane, sketchPlane, symbol, nonNvfCurtainWalls, sharedFacadeColumns);
                     totalCreated += created;
                     if (created > 0) processedCount++;
                     _logger.Info("  Subtotal created: " + created);
@@ -265,13 +276,13 @@ namespace CWPanelsCustomizer
             sw.Stop();
             _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
 
-            TaskDialog.Show(IS_NAME,
-                "Создано: " + totalCreated + " стоек\n" +
-                "Фасадов: " + processedCount + "\n" +
-                "Время: " + (sw.ElapsedMilliseconds / 1000.0).ToString("F1") + " сек");
+            //TaskDialog.Show(IS_NAME,
+            //    "Создано: " + totalCreated + " стоек\n" +
+            //    "Фасадов: " + processedCount + "\n" +
+            //    "Время: " + (sw.ElapsedMilliseconds / 1000.0).ToString("F1") + " сек");
         }
 
-        private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, List<Wall> nonNvfWalls)
+        private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, List<Wall> nonNvfWalls, List<double[]> sharedFacadeColumns)
         {
             CurtainGrid curtainGrid = targetWall.CurtainGrid;
             if (curtainGrid == null) return 0;
@@ -631,10 +642,10 @@ namespace CWPanelsCustomizer
             }
 
             // --- Этап 6: Заполнение промежутков > 600 мм между стойками ---
-            // Если в плоскости XY расстояние между двумя соседними колонками стоек > 600 мм,
-            // добавляем стойку посередине. Повторяем до тех пор, пока все промежутки ≤ 600 мм.
-            const double GAP_FILL_MAX_FT = 600.0 / FEET_TO_MM;
-            _logger.Info("  === Gap filling (max 600mm between racks) ===");
+            // Если в плоскости XY расстояние между двумя соседними колонками стоек > GAP_FILL_MAX_MM,
+            // добавляем стойку посередине. Повторяем до тех пор, пока все промежутки ≤ GAP_FILL_MAX_MM.
+            // Если вычисленная середина ближе COLUMN_SNAP_DIST_MM к существующей колонке — снапим к ней.
+            _logger.Info("  === Gap filling (max " + GAP_FILL_MAX_MM + "mm between racks) ===");
 
             rackColumns.Sort((a, b) => a[0].CompareTo(b[0]));
 
@@ -655,6 +666,38 @@ namespace CWPanelsCustomizer
                     if (gap <= GAP_FILL_MAX_FT + 0.001) continue;
 
                     double midH = (rackColumns[i][0] + rackColumns[i + 1][0]) * 0.5;
+
+                    // Снап: если вычисленная середина ближе COLUMN_SNAP_DIST_MM к существующей
+                    // колонке (текущего или любого предыдущего витража на том же фасаде) —
+                    // совмещаем стойку с ней, а не создаём смещённую вертикаль.
+                    // Выбираем ближайшую колонку в радиусе COLUMN_SNAP_DIST_MM.
+                    {
+                        double bestSnapDist = COLUMN_SNAP_DIST_FT;
+                        double bestSnapH = midH;
+
+                        // Проверяем текущий витраж (исключая границы текущего промежутка i/i+1)
+                        for (int k = 0; k < rackColumns.Count; k++)
+                        {
+                            if (k == i || k == i + 1) continue;
+                            double d = Math.Abs(rackColumns[k][0] - midH);
+                            if (d < bestSnapDist) { bestSnapDist = d; bestSnapH = rackColumns[k][0]; }
+                        }
+                        // Проверяем колонки предыдущих витражей на этом фасаде
+                        foreach (var col in sharedFacadeColumns)
+                        {
+                            double d = Math.Abs(col[0] - midH);
+                            if (d < bestSnapDist) { bestSnapDist = d; bestSnapH = col[0]; }
+                        }
+
+                        if (bestSnapH != midH)
+                        {
+                            _logger.Info("    GapFill snap: H=" + FormatFeetMm(midH)
+                                + " → " + FormatFeetMm(bestSnapH)
+                                + " (dist=" + FormatFeetMm(bestSnapDist) + " < " + COLUMN_SNAP_DIST_MM + "mm)");
+                            midH = bestSnapH;
+                        }
+                    }
+
                     double dH = midH - rackColumns[i][0];
                     XYZ leftPt = new XYZ(rackColumns[i][1], rackColumns[i][2], 0);
                     XYZ midBasePt = new XYZ(
@@ -686,6 +729,9 @@ namespace CWPanelsCustomizer
             }
 
             _logger.Info("  Gap fill: " + gapIter + " positions added");
+
+            // Передаём позиции этого витража в общий список фасада для snap следующих витражей
+            sharedFacadeColumns.AddRange(rackColumns);
 
             return created;
         }
