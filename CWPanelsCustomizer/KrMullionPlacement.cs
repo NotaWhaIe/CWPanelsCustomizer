@@ -259,7 +259,7 @@ namespace CWPanelsCustomizer
                     _logger.Info("  Subtotal created: " + created);
                 }
 
-                _logger.LogSummary("Placement result", ("Deleted", allToDelete.Count), ("Created", totalCreated), ("Facades", processedCount));
+                _logger.LogSummary("Placement result", ("Deleted", allToDelete.Count), ("Created", totalCreated), ("CurtainWalls", processedCount));
                 t.Commit();
 
                 // Если после размещения есть дубли — выделить их в UI для ревью
