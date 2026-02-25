@@ -1,3 +1,4 @@
+// test
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -151,6 +152,28 @@ namespace CWPanelsCustomizer
 
             nvfCurtainWalls = RemoveEmbeddedNvfWalls(nvfCurtainWalls);
 
+            // --- Фильтр по выделению ---
+            bool selectionMode = false;
+            {
+                ICollection<ElementId> selIds = _uidoc.Selection.GetElementIds();
+                if (selIds.Count > 0)
+                {
+                    var selIdSet = new HashSet<int>(selIds.Select(id => id.IntegerValue));
+                    List<Wall> selectedNvf = nvfCurtainWalls
+                        .Where(w => selIdSet.Contains(w.Id.IntegerValue))
+                        .ToList();
+                    if (selectedNvf.Count > 0)
+                    {
+                        selectionMode = true;
+                        nvfCurtainWalls = selectedNvf;
+                        _logger.Info("Mode: SELECTION — processing "
+                            + selectedNvf.Count + " selected НВФ wall(s)");
+                    }
+                }
+            }
+            if (!selectionMode)
+                _logger.Info("Mode: ALL — processing all " + nvfCurtainWalls.Count + " НВФ walls");
+
             if (nvfCurtainWalls.Count == 0)
             {
                 _logger.Warn("No curtain walls with КРСТ_НВФ_ panels found.");
@@ -177,6 +200,31 @@ namespace CWPanelsCustomizer
             List<ElementId> allToDelete = toDeleteNew.Concat(toDeleteOld).Distinct().ToList();
             _logger.Info("Queued for deletion: new=" + toDeleteNew.Count
                 + " old=" + toDeleteOld.Count + " total=" + allToDelete.Count);
+
+            // В режиме выделения удаляем только стойки внутри BB выбранных витражей
+            if (selectionMode)
+            {
+                // Собираем BB всех выбранных витражей с запасом 0.5 ft (~150 мм)
+                const double bbTolerance = 0.5;
+                var selBBs = nvfCurtainWalls
+                    .Select(w => w.get_BoundingBox(null))
+                    .Where(bb => bb != null)
+                    .ToList();
+
+                allToDelete = allToDelete.Where(eid =>
+                {
+                    Element el = _doc.GetElement(eid);
+                    if (el == null) return false;
+                    BoundingBoxXYZ elBB = el.get_BoundingBox(null);
+                    if (elBB == null) return false;
+                    double elX = (elBB.Min.X + elBB.Max.X) / 2.0;
+                    double elY = (elBB.Min.Y + elBB.Max.Y) / 2.0;
+                    return selBBs.Any(bb =>
+                        elX >= bb.Min.X - bbTolerance && elX <= bb.Max.X + bbTolerance &&
+                        elY >= bb.Min.Y - bbTolerance && elY <= bb.Max.Y + bbTolerance);
+                }).ToList();
+                _logger.Info("Selection mode: filtered allToDelete → " + allToDelete.Count);
+            }
 
             int totalCreated = 0;
             int processedCount = 0;
