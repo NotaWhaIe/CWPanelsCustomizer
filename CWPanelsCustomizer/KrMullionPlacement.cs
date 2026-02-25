@@ -20,54 +20,27 @@ namespace CWPanelsCustomizer
 
         private const double FEET_TO_MM = 304.8;
 
-        // ┌─────────────────────────────────────────────────────────────┐
-        // │           ТРЕБОВАНИЯ ПО РАЗМЕЩЕНИЮ СТОЕК                   │
-        // └─────────────────────────────────────────────────────────────┘
-        private const double RACK_HEIGHT_MM        = 3000.0; // Номинальная высота стойки
-        private const double RACK_HEIGHT_FT        = RACK_HEIGHT_MM / FEET_TO_MM;
-        private const double RACK_GAP_MM           = 10.0;   // Зазор между стойками по вертикали
-        private const double RACK_GAP_FT           = RACK_GAP_MM / FEET_TO_MM;
-        private const double RACK_START_OFFSET_MM  = 5.0;    // Отступ низа первой стойки от низа витража
-        private const double RACK_START_OFFSET_FT  = RACK_START_OFFSET_MM / FEET_TO_MM;
-        private const double RACK_MIN_HEIGHT_MM    = 1200.0; // Минимально допустимая высота стойки
-        private const double RACK_MIN_HEIGHT_FT    = RACK_MIN_HEIGHT_MM / FEET_TO_MM;
-        private const double OPENING_TOP_OFFSET_MM = 95.0;   // Отступ от верха проёма окна
-        private const double OPENING_TOP_OFFSET_FT = OPENING_TOP_OFFSET_MM / FEET_TO_MM;
-        private const double EDGE_OFFSET_MM        = 150.0;  // Отступ боковой стойки от края проёма/витража
-        private const double EDGE_OFFSET_FT        = EDGE_OFFSET_MM / FEET_TO_MM;
-        private const double GAP_FILL_MAX_MM       = 600.0;  // Максимально допустимый шаг между стойками в плане
-        private const double GAP_FILL_MAX_FT       = GAP_FILL_MAX_MM / FEET_TO_MM;
-        private const double COLUMN_SNAP_DIST_MM   = 140.0;  // Стойки ближе этого → на одну вертикаль
-        private const double COLUMN_SNAP_DIST_FT   = COLUMN_SNAP_DIST_MM / FEET_TO_MM;
-        // └─────────────────────────────────────────────────────────────┘
+        // Требования размещения стоек (мм → фут)
+        private const double RACK_HEIGHT_MM = 3000.0;       private const double RACK_HEIGHT_FT        = RACK_HEIGHT_MM        / FEET_TO_MM;
+        private const double RACK_GAP_MM    = 10.0;         private const double RACK_GAP_FT           = RACK_GAP_MM           / FEET_TO_MM;
+        private const double RACK_START_OFFSET_MM  = 5.0;   private const double RACK_START_OFFSET_FT  = RACK_START_OFFSET_MM  / FEET_TO_MM;
+        private const double RACK_MIN_HEIGHT_MM    = 1200.0; private const double RACK_MIN_HEIGHT_FT   = RACK_MIN_HEIGHT_MM    / FEET_TO_MM;
+        private const double OPENING_TOP_OFFSET_MM = 95.0;  private const double OPENING_TOP_OFFSET_FT = OPENING_TOP_OFFSET_MM / FEET_TO_MM;
+        private const double EDGE_OFFSET_MM        = 150.0; private const double EDGE_OFFSET_FT        = EDGE_OFFSET_MM        / FEET_TO_MM;
+        private const double GAP_FILL_MAX_MM       = 600.0; private const double GAP_FILL_MAX_FT       = GAP_FILL_MAX_MM       / FEET_TO_MM;
+        private const double COLUMN_SNAP_DIST_MM   = 140.0; private const double COLUMN_SNAP_DIST_FT   = COLUMN_SNAP_DIST_MM   / FEET_TO_MM;
+        private const double MAX_FACADE_DIST_FT    = 1000.0 / FEET_TO_MM;
 
-        private const double MAX_FACADE_DIST_FT = 1000.0 / FEET_TO_MM;
+        // Кронштейны
+        private const double BRACKET_OFFSET_DEFAULT_MM = 200.0, BRACKET_OFFSET_SHORT_MM = 150.0;
+        private const double BRACKET_STEP_MID_MM       = 600.0, BRACKET_STEP_SHORT_MM   = 300.0;
 
-        // --- Кронштейны (параметры семейства по высоте стойки) ---
-        private const double BRACKET_OFFSET_DEFAULT_MM = 200.0;  // ≥1200 мм
-        private const double BRACKET_OFFSET_SHORT_MM   = 150.0;  // 600–1199 мм
-        private const double BRACKET_STEP_MID_MM       = 600.0;  // 900–1199 мм
-        private const double BRACKET_STEP_SHORT_MM     = 300.0;  // 600–899 мм
-
-        // Индексы массива данных проёма: double[] { hCenter, zMin, zMax, hLeft, hRight }
-        private const int OP_H_CENTER = 0;
-        private const int OP_Z_MIN    = 1;
-        private const int OP_Z_MAX    = 2;
-        private const int OP_H_LEFT   = 3;
-        private const int OP_H_RIGHT  = 4;
-
-        // Индексы колонки стойки: double[] { hPos, x, y, botZ, topZ }
-        private const int RC_H     = 0;
-        private const int RC_X     = 1;
-        private const int RC_Y     = 2;
-        private const int RC_BOT_Z = 3;
-        private const int RC_TOP_Z = 4;
-
-        // Индексы зоны исключения: double[] { hMin, hMax, zMin, zMax }
-        private const int EZ_H_MIN = 0;
-        private const int EZ_H_MAX = 1;
-        private const int EZ_Z_MIN = 2;
-        private const int EZ_Z_MAX = 3;
+        // Индексы проёма [hCenter, zMin, zMax, hLeft, hRight]
+        private const int OP_H_CENTER = 0, OP_Z_MIN = 1, OP_Z_MAX = 2, OP_H_LEFT = 3, OP_H_RIGHT = 4;
+        // Индексы стойки [hPos, x, y, botZ, topZ]
+        private const int RC_H = 0, RC_X = 1, RC_Y = 2, RC_BOT_Z = 3, RC_TOP_Z = 4;
+        // Индексы зоны исключения [hMin, hMax, zMin, zMax]
+        private const int EZ_H_MIN = 0, EZ_H_MAX = 1, EZ_Z_MIN = 2, EZ_Z_MAX = 3;
 
         private UIDocument _uidoc;
         private Document _doc;
@@ -109,9 +82,7 @@ namespace CWPanelsCustomizer
 
             _logger.Info("Regular walls (non-curtain): " + regularWalls.Count);
 
-            List<PlanarFace> backingFaces = new List<PlanarFace>();
-            foreach (Wall w in regularWalls)
-                backingFaces.AddRange(GetVerticalPlanarFaces(w));
+            var backingFaces = regularWalls.SelectMany(GetVerticalPlanarFaces).ToList();
 
             _logger.Info("Candidate vertical faces: " + backingFaces.Count);
 
@@ -248,10 +219,7 @@ namespace CWPanelsCustomizer
                     _doc.Regenerate(); // обновить граф зависимостей
                 }
 
-                // Удалить накопленные SketchPlane от предыдущих запусков.
-                // SketchPlane.Create(doc, plane) дедуплицирует по Normal+Origin и возвращает
-                // существующий SketchPlane (с неверным XVec), игнорируя новые оси.
-                // После Regenerate() стойки удалены → освободившиеся SketchPlane-ы удаляем.
+                // Удалить накопленные SketchPlane без зависимых FamilyInstance
                 {
                     var fiFilter = new ElementClassFilter(typeof(FamilyInstance));
                     List<SketchPlane> verticalSPs = new FilteredElementCollector(_doc)
@@ -310,10 +278,7 @@ namespace CWPanelsCustomizer
                         continue;
                     }
 
-                    // Для вертикальной стойки Профиль_Длина растёт вдоль YVec плоскости.
-                    // YVec = (0,0,1) = мировой вертикаль → стойки вертикальные.
-                    // XVec = (-Normal.Y, Normal.X, 0) = горизонталь in-plane, чтобы XVec×YVec=Normal (правосторонняя СК).
-                    // Проверка для всех 4 направлений: Normal=(0,-1,0)→XVec=(1,0,0), (-1,0,0)→(0,-1,0), (0,1,0)→(-1,0,0), (1,0,0)→(0,1,0).
+                    // YVec=(0,0,1) → стойки вертикальные; XVec=(-Ny,Nx,0) — горизонталь in-plane (правосторонняя СК)
                     XYZ planeNormal = matchingFace.FaceNormal;
                     XYZ planeXVec = new XYZ(-planeNormal.Y, planeNormal.X, 0.0); // горизонталь in-plane
                     Plane workPlane = Plane.Create(new Frame(matchingFace.Origin, planeXVec, XYZ.BasisZ, planeNormal));
@@ -345,10 +310,6 @@ namespace CWPanelsCustomizer
             sw.Stop();
             _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
 
-            //TaskDialog.Show(IS_NAME,
-            //    "Создано: " + totalCreated + " стоек\n" +
-            //    "Фасадов: " + processedCount + "\n" +
-            //    "Время: " + (sw.ElapsedMilliseconds / 1000.0).ToString("F1") + " сек");
         }
 
         private int ProcessSingleCurtainWall(Wall targetWall, Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, List<Wall> nonNvfWalls, List<double[]> sharedFacadeColumns)
@@ -437,9 +398,7 @@ namespace CWPanelsCustomizer
             List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal, workPlane);
             const double OPENING_MATCH_TOLERANCE_FT = 50.0 / FEET_TO_MM;
 
-            // Фильтр проёмов по 2D-контуру текущего витража (H и Z).
-            // Устраняет ситуацию, когда несколько витражей на одном фасаде претендуют
-            // на одни и те же окна и дублируют боковые стойки.
+            // Фильтр проёмов по 2D-контуру витража (устраняет дубли на общем фасаде)
             {
                 int before = openingDataList.Count;
                 openingDataList = openingDataList
@@ -452,9 +411,7 @@ namespace CWPanelsCustomizer
                     _logger.Info("  Openings filtered to wall bounds: " + openingDataList.Count + " (was " + before + ")");
             }
 
-            // Исключить проёмы, перекрытые не-НВФ витражами (включая вложенные витражи-панели).
-            // Любой не-НВФ витраж на фасаде закрывает окна несущей стены — стойки не должны
-            // огибать их как обычные окна. Фильтрует ВСЕ не-НВФ витражи (без проверки панелей).
+            // Исключить проёмы за не-НВФ витражами (они закрывают окна несущей стены)
             {
                 var nonNvfFilterZones = new List<double[]>(); // [hLeft, hRight, zBot, zTop]
                 foreach (Wall nonNvfWall in nonNvfWalls)
@@ -488,14 +445,10 @@ namespace CWPanelsCustomizer
 
             List<double[]> outlineEdges = GetWallOutlineVerticalEdges(targetWall, wallHorizontal);
 
-            // Зоны исключения: не-НВФ витражи на том же фасаде.
-            // Стойки не размещаются в контурах витражей без КРСТ_НВФ_ панелей.
-            // Формат: [hMin, hMax, zMin, zMax] в координатах фасада.
+            // Зоны исключения: не-НВФ витражи на фасаде → стойки не ставятся в их контурах
             var excludeZones = new List<double[]>();
             foreach (Wall nonNvfWall in nonNvfWalls)
             {
-                // Стены без содержательных панелей (только "Пустая системная панель" и "Системная панель")
-                // не создают зону исключения — иначе они режут стойки рядом с собой.
                 if (!HasSubstantialPanels(nonNvfWall)) continue;
 
                 XYZ nnNormal = GetWallNormal(nonNvfWall);
@@ -518,8 +471,7 @@ namespace CWPanelsCustomizer
 
             // --- Этап 3: Размещение стоек по линиям сетки ---
             int created = 0;
-            // [H, X, Y, BottomZ, TopZ] — все позиции размещённых колонок стоек для этапа 6
-            var rackColumns = new List<double[]>();
+            var rackColumns = new List<double[]>(); // [H, X, Y, BottomZ, TopZ]
 
             for (int i = 0; i < validGridLines.Count; i++)
             {
@@ -733,10 +685,7 @@ namespace CWPanelsCustomizer
                 }
             }
 
-            // --- Этап 6: Заполнение промежутков > 600 мм между стойками ---
-            // Если в плоскости XY расстояние между двумя соседними колонками стоек > GAP_FILL_MAX_MM,
-            // добавляем стойку посередине. Повторяем до тех пор, пока все промежутки ≤ GAP_FILL_MAX_MM.
-            // Если вычисленная середина ближе COLUMN_SNAP_DIST_MM к существующей колонке — снапим к ней.
+            // --- Этап 6: Gap-fill — добавляем стойку в промежутки > 600мм ---
             _logger.Info("  === Gap filling (max " + GAP_FILL_MAX_MM + "mm between racks) ===");
 
             rackColumns.Sort((a, b) => a[RC_H].CompareTo(b[RC_H]));
@@ -764,9 +713,7 @@ namespace CWPanelsCustomizer
                 created: ref created);
             _logger.Info("  Gap fill: " + gapCount + " positions added");
 
-            // --- Этап 6б: Gap-fill второй проход — нижний уровень ---
-            // Стойки side_piece (zBot >> wallZMin) разрывают зазор на нижнем уровне.
-            // Повторяем проверку только для «полных» колонок (zBot у нижней зоны стены).
+            // --- Этап 6б: Gap-fill — нижний уровень (side_piece не участвуют) ---
             {
                 double groundThreshold = wallZMin + RACK_START_OFFSET_FT + (300.0 / FEET_TO_MM);
                 var groundCols = rackColumns
@@ -798,9 +745,7 @@ namespace CWPanelsCustomizer
                     _logger.Info("  Gap fill (ground level): " + gf2Count + " positions added");
             }
 
-            // --- Диагностика покрытия НВФ-панелей ---
-            // Для каждой КРСТ_НВФ_ панели проверяем, попадает ли хотя бы одна колонка стоек
-            // в её горизонтальный диапазон [hLeft, hRight]. Логируем непокрытые панели.
+            // --- Диагностика: непокрытые КРСТ_НВФ_ панели ---
             {
                 CurtainGrid cg2 = targetWall.CurtainGrid;
                 ICollection<ElementId> panelIds = cg2?.GetPanelIds();
@@ -841,10 +786,7 @@ namespace CWPanelsCustomizer
             return created;
         }
 
-        /// <summary>
-        /// Размещает стойки с разбивкой по высоте в заданных свободных сегментах.
-        /// Возвращает количество созданных экземпляров.
-        /// </summary>
+        // Размещает стойки с разбивкой по высоте в сегментах, возвращает количество созданных.
         private int PlaceRacksInSegments(List<double[]> segments, XYZ basePt,
             Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol, string logPrefix)
         {
@@ -938,19 +880,16 @@ namespace CWPanelsCustomizer
         private List<PlanarFace> GetVerticalPlanarFaces(Wall wall)
         {
             var faces = new List<PlanarFace>();
-            Options opts = new Options { ComputeReferences = true, DetailLevel = ViewDetailLevel.Fine };
-            GeometryElement geoElem = wall.get_Geometry(opts);
-            if (geoElem == null) return faces;
-
-            foreach (GeometryObject geoObj in geoElem)
+            GeometryElement geo = wall.get_Geometry(new Options { ComputeReferences = true, DetailLevel = ViewDetailLevel.Fine });
+            if (geo == null) return faces;
+            foreach (GeometryObject obj in geo)
             {
-                Solid solid = geoObj as Solid;
+                Solid solid = obj as Solid;
                 if (solid == null || solid.Faces.Size == 0) continue;
                 foreach (Face f in solid.Faces)
                 {
                     PlanarFace pf = f as PlanarFace;
-                    if (pf == null) continue;
-                    if (Math.Abs(pf.FaceNormal.DotProduct(XYZ.BasisZ)) < 0.1)
+                    if (pf != null && Math.Abs(pf.FaceNormal.DotProduct(XYZ.BasisZ)) < 0.1)
                         faces.Add(pf);
                 }
             }
@@ -959,15 +898,9 @@ namespace CWPanelsCustomizer
 
         private XYZ GetWallNormal(Wall wall)
         {
-            LocationCurve locCurve = wall.Location as LocationCurve;
-            if (locCurve == null) return null;
-            Curve curve = locCurve.Curve;
-            XYZ start = curve.GetEndPoint(0);
-            XYZ end = curve.GetEndPoint(1);
-            XYZ direction = end - start;
-            if (direction.IsZeroLength()) return null;
-            XYZ normal = direction.Normalize().CrossProduct(XYZ.BasisZ).Normalize();
-            return normal;
+            if (!(wall.Location is LocationCurve lc)) return null;
+            XYZ dir = lc.Curve.GetEndPoint(1) - lc.Curve.GetEndPoint(0);
+            return dir.IsZeroLength() ? null : dir.Normalize().CrossProduct(XYZ.BasisZ).Normalize();
         }
 
         private XYZ GetWallBBCenter(Wall wall)
@@ -981,86 +914,53 @@ namespace CWPanelsCustomizer
         {
             PlanarFace best = null;
             double bestDist = double.MaxValue;
-
             foreach (PlanarFace face in faces)
             {
-                double dot = Math.Abs(face.FaceNormal.DotProduct(normal));
-                if (dot < 0.95) continue;
-
+                if (Math.Abs(face.FaceNormal.DotProduct(normal)) < 0.95) continue;
                 double dist = Math.Abs(face.FaceNormal.DotProduct(point - face.Origin));
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = face;
-                }
+                if (dist < bestDist) { bestDist = dist; best = face; }
             }
-
             if (best != null)
                 _logger.Info("  Matched face: dist=" + FormatFeetMm(bestDist) + " Normal=" + FormatXyz(best.FaceNormal));
-
             return best;
         }
 
         private bool HasNvfPanels(Wall curtainWall)
         {
-            CurtainGrid grid = curtainWall.CurtainGrid;
-            if (grid == null) return false;
-
-            ICollection<ElementId> panelIds = grid.GetPanelIds();
-            if (panelIds == null || panelIds.Count == 0) return false;
-
-            foreach (ElementId panelId in panelIds)
+            ICollection<ElementId> ids = curtainWall.CurtainGrid?.GetPanelIds();
+            if (ids == null || ids.Count == 0) return false;
+            return ids.Any(pid =>
             {
-                FamilyInstance fi = _doc.GetElement(panelId) as FamilyInstance;
-                if (fi != null && fi.Symbol != null &&
-                    fi.Symbol.FamilyName.StartsWith("КРСТ_НВФ_", StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
+                FamilyInstance fi = _doc.GetElement(pid) as FamilyInstance;
+                return fi?.Symbol?.FamilyName.StartsWith("КРСТ_НВФ_", StringComparison.OrdinalIgnoreCase) == true;
+            });
         }
 
-        /// <summary>
-        /// Возвращает true, если витраж содержит хотя бы одну содержательную панель
-        /// (не "Пустая системная панель"). Используется для фильтрации зон исключения:
-        /// витражи только с пустыми панелями не должны блокировать размещение стоек.
-        /// </summary>
+        // true если витраж имеет содержательные (не "Пустая"/"Системная") панели
         private bool HasSubstantialPanels(Wall curtainWall)
         {
-            CurtainGrid grid = curtainWall.CurtainGrid;
-            if (grid == null) return false;
-
-            ICollection<ElementId> panelIds = grid.GetPanelIds();
-            if (panelIds == null || panelIds.Count == 0) return false;
-
-            foreach (ElementId panelId in panelIds)
+            ICollection<ElementId> ids = curtainWall.CurtainGrid?.GetPanelIds();
+            if (ids == null || ids.Count == 0) return false;
+            return ids.Any(pid =>
             {
-                FamilyInstance fi = _doc.GetElement(panelId) as FamilyInstance;
-                if (fi?.Symbol == null) continue;
+                FamilyInstance fi = _doc.GetElement(pid) as FamilyInstance;
+                if (fi?.Symbol == null) return false;
                 string fn = fi.Symbol.FamilyName;
-                // Пропускаем системные/пустые панели-заглушки
-                if (fn.IndexOf("Пустая", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                if (fn.IndexOf("Системная", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                return true;
-            }
-            return false;
+                return fn.IndexOf("Пустая",   StringComparison.OrdinalIgnoreCase) < 0
+                    && fn.IndexOf("Системная", StringComparison.OrdinalIgnoreCase) < 0;
+            });
         }
 
         private List<CurtainGridLine> GetAllCurtainGridLines(CurtainGrid grid)
         {
             var result = new List<CurtainGridLine>();
             if (grid == null) return result;
-
-            foreach (ElementId id in grid.GetUGridLineIds() ?? new List<ElementId>())
-            {
-                CurtainGridLine gl = _doc.GetElement(id) as CurtainGridLine;
-                if (gl != null) result.Add(gl);
-            }
-            foreach (ElementId id in grid.GetVGridLineIds() ?? new List<ElementId>())
-            {
-                CurtainGridLine gl = _doc.GetElement(id) as CurtainGridLine;
-                if (gl != null) result.Add(gl);
-            }
-
+            foreach (var ids in new[] { grid.GetUGridLineIds(), grid.GetVGridLineIds() })
+                foreach (ElementId id in ids ?? new List<ElementId>())
+                {
+                    CurtainGridLine gl = _doc.GetElement(id) as CurtainGridLine;
+                    if (gl != null) result.Add(gl);
+                }
             return result;
         }
 
@@ -1093,32 +993,20 @@ namespace CWPanelsCustomizer
         {
             double[] snapped = (double[])sortedBottomZ.Clone();
             if (snapped.Length < 3) return snapped;
-
             for (int i = 1; i < snapped.Length - 1; i++)
             {
-                double left = sortedBottomZ[i - 1];
-                double right = sortedBottomZ[i + 1];
-                double current = sortedBottomZ[i];
-                double lo = Math.Min(left, right);
-                double hi = Math.Max(left, right);
-
-                if (current > lo + 0.001 && current < hi - 0.001)
+                double left = sortedBottomZ[i - 1], right = sortedBottomZ[i + 1], cur = sortedBottomZ[i];
+                double lo = Math.Min(left, right), hi = Math.Max(left, right);
+                if (cur > lo + 0.001 && cur < hi - 0.001)
                 {
-                    double distLeft = Math.Abs(current - left);
-                    double distRight = Math.Abs(current - right);
-                    snapped[i] = distLeft <= distRight ? left : right;
-                    _logger.Info("Snap transition: sortedIdx=" + i
-                        + " Z=" + FormatFeetMm(current) + " → " + FormatFeetMm(snapped[i]));
+                    snapped[i] = Math.Abs(cur - left) <= Math.Abs(cur - right) ? left : right;
+                    _logger.Info("Snap transition: sortedIdx=" + i + " Z=" + FormatFeetMm(cur) + " → " + FormatFeetMm(snapped[i]));
                 }
             }
-
             return snapped;
         }
 
-        /// <summary>
-        /// Собирает оконные проёмы с фильтрацией по расстоянию до фасадной плоскости.
-        /// Возвращает [hCenter, zMin, zMax, hLeft, hRight].
-        /// </summary>
+        // Собирает проёмы с фильтрацией по фасадной плоскости → [hCenter, zMin, zMax, hLeft, hRight]
         private List<double[]> CollectWindowOpenings(string familyName, XYZ wallHorizontal, Plane facadePlane)
         {
             var result = new List<double[]>();
@@ -1148,12 +1036,7 @@ namespace CWPanelsCustomizer
 
                 double hPos = wallHorizontal.DotProduct(locPt.Point);
 
-                double h1 = wallHorizontal.X * bb.Min.X + wallHorizontal.Y * bb.Min.Y;
-                double h2 = wallHorizontal.X * bb.Min.X + wallHorizontal.Y * bb.Max.Y;
-                double h3 = wallHorizontal.X * bb.Max.X + wallHorizontal.Y * bb.Min.Y;
-                double h4 = wallHorizontal.X * bb.Max.X + wallHorizontal.Y * bb.Max.Y;
-                double hLeft = Math.Min(Math.Min(h1, h2), Math.Min(h3, h4));
-                double hRight = Math.Max(Math.Max(h1, h2), Math.Max(h3, h4));
+                GetHorizontalRange(bb, wallHorizontal, out double hLeft, out double hRight);
 
                 result.Add(new[] { hPos, bb.Min.Z, bb.Max.Z, hLeft, hRight });
             }
@@ -1173,10 +1056,7 @@ namespace CWPanelsCustomizer
             return result;
         }
 
-        /// <summary>
-        /// Находит проёмы, чей горизонтальный BoundingBox охватывает позицию линии сетки.
-        /// Использует [3]=hLeft, [4]=hRight из CollectWindowOpenings.
-        /// </summary>
+        // Проёмы с BB, охватывающим позицию gridLineHPos (hLeft..hRight)
         private List<double[]> FindOpeningsOverlappingGridLine(
             List<double[]> allOpenings, double gridLineHPos)
         {
@@ -1227,11 +1107,7 @@ namespace CWPanelsCustomizer
             return segments;
         }
 
-        /// <summary>
-        /// Извлекает вертикальные рёбра контура витражной стены.
-        /// Для стен с профилем — из Sketch.Profile, иначе — из LocationCurve + высота.
-        /// Возвращает список [hPosition, zBottom, zTop].
-        /// </summary>
+        // Вертикальные рёбра контура стены: из Sketch.Profile или LocationCurve → [hPos, zBot, zTop]
         private List<double[]> GetWallOutlineVerticalEdges(Wall wall, XYZ wallHorizontal)
         {
             var edges = new List<double[]>();
@@ -1385,7 +1261,7 @@ namespace CWPanelsCustomizer
             return result;
         }
 
-        /// <summary>Возвращает Z-диапазоны [zMin, zMax] зон исключения, чья H-полоса содержит h.</summary>
+        // Z-диапазоны [zMin, zMax] зон исключения, чья H-полоса содержит h
         private List<double[]> GetZExcludesForH(List<double[]> excludeZones, double h)
         {
             var result = new List<double[]>();
@@ -1395,11 +1271,7 @@ namespace CWPanelsCustomizer
             return result;
         }
 
-        /// <summary>
-        /// Вычитает жёсткие Z-зоны исключения [zMin, zMax] из сегментов.
-        /// В отличие от GetFreeSegments, зазор OPENING_TOP_OFFSET не применяется —
-        /// зоны вычитаются точно.
-        /// </summary>
+        // Вычитает Z-зоны исключения из сегментов (без OPENING_TOP_OFFSET)
         private List<double[]> SubtractExcludeZones(List<double[]> segments, List<double[]> zExcludes)
         {
             if (zExcludes.Count == 0) return segments;
@@ -1443,10 +1315,7 @@ namespace CWPanelsCustomizer
             return true;
         }
 
-        /// <summary>
-        /// Задаёт параметры кронштейнов в зависимости от высоты стойки,
-        /// чтобы предотвратить Кронштейн_Количество=0 и ошибку "Не удалось сформировать тип".
-        /// </summary>
+        // Задаёт параметры кронштейнов по высоте (предотвращает "Не удалось сформировать тип")
         private void SetBracketParams(FamilyInstance inst, double heightFt)
         {
             double heightMm = heightFt * FEET_TO_MM;
@@ -1477,7 +1346,7 @@ namespace CWPanelsCustomizer
             return feet.ToString("F4") + "ft (" + (feet * FEET_TO_MM).ToString("F0") + "mm)";
         }
 
-        /// <summary>Вычисляет горизонтальный диапазон BoundingBox вдоль оси wallHorizontal.</summary>
+        // Горизонтальный диапазон BoundingBox вдоль wallHorizontal
         private static void GetHorizontalRange(BoundingBoxXYZ bb, XYZ wallHorizontal,
             out double hMin, out double hMax)
         {
@@ -1489,12 +1358,7 @@ namespace CWPanelsCustomizer
             hMax = Math.Max(Math.Max(h1, h2), Math.Max(h3, h4));
         }
 
-        /// <summary>
-        /// Один проход заполнения промежутков: находит пары в workColumns с gap > 600мм
-        /// и вставляет стойку посередине. Возвращает количество добавленных позиций.
-        /// snapColumns — источник для snap (обычно workColumns или filtered subset).
-        /// logLabel — префикс для лога ("GapFill" или "GapFill2").
-        /// </summary>
+        // Заполняет промежутки > 600мм в workColumns, возвращает количество добавленных позиций.
         private int RunGapFillPass(
             List<double[]> workColumns,
             List<double[]> snapColumns,
@@ -1592,10 +1456,7 @@ namespace CWPanelsCustomizer
             return gapIter;
         }
 
-        /// <summary>
-        /// Исключает НВФ-витражи, вставленные как панель в другой НВФ-витраж,
-        /// используя GetDependentElements(Wall) — точный критерий Revit API.
-        /// </summary>
+        // Исключает НВФ-витражи, вставленные как панель, через GetDependentElements(Wall)
         private List<Wall> RemoveEmbeddedNvfWalls(List<Wall> nvfWalls)
         {
             var nvfIdSet = new HashSet<int>(nvfWalls.Select(w => w.Id.IntegerValue));
@@ -1632,8 +1493,7 @@ namespace CWPanelsCustomizer
         {
             private readonly RevitLogger _logger;
 
-            /// <summary>Id всех элементов, задействованных в предупреждениях (дубли и т.п.).</summary>
-            public List<ElementId> WarningElementIds { get; } = new List<ElementId>();
+            public List<ElementId> WarningElementIds { get; } = new List<ElementId>(); // Id из предупреждений о дублях
 
             public DuplicateInstancesWarningSuppressor(RevitLogger logger) { _logger = logger; }
 
