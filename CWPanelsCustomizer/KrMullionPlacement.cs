@@ -10,7 +10,7 @@ using CWPanelsCustomizer.Helpers;
 
 namespace CWPanelsCustomizer
 {
-    // 2026-02-25 12:46 | среда | неделя 9
+    // 2026-02-25 12:50 | среда | неделя 9
     [Transaction(TransactionMode.Manual)]
     public class KrMullionPlacement : IExternalCommand
     {
