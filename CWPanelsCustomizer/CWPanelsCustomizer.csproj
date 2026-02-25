@@ -87,6 +87,8 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>xcopy /Y /F "$(TargetPath)" "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022"
-echo %25DATE%25 %25TIME%25 > "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022\reload.trigger"</PostBuildEvent>
+echo %25DATE%25 %25TIME%25 > "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022\reload.trigger"
+xcopy /Y /F /I "$(TargetPath)" "\\krost.local\files\A005\B011\C019\Обмен_по_проектам\!_ТИМ\2022\001_Test2022\" 2&gt;nul
+exit 0</PostBuildEvent>
   </PropertyGroup>
 </Project>
