@@ -65,6 +65,11 @@ namespace CWPanelsCustomizer
         private HashSet<ElementId> _selectedWallIds;   // ByWalls
         private HashSet<ElementId> _selectedPanelIds;  // ByPanels
 
+        // --- Авто-отмена предыдущего запуска ---
+        // [(newKrFiId, origArTypeId)]: сбрасывает смещение и откатывает тип AR→KR
+        private static readonly List<(int krFiId, int origArTypeId)> _undoRecord
+            = new List<(int, int)>();
+
         private const double EPS = 1e-9;
         private const double FEET_TO_MM = 304.8;
 
@@ -206,9 +211,41 @@ namespace CWPanelsCustomizer
             _logger.Info($"[Selection] Mode=All (selected {selectedIds.Count} non-CW elements)");
         }
 
+        /// <summary>Откат предыдущего запуска: сброс смещения + возврат типа AR.</summary>
+        private void UndoPreviousRun(Document doc, string tag)
+        {
+            if (_undoRecord.Count == 0) return;
+            _logger.Info($"{tag} [UNDO] Откат предыдущего запуска: {_undoRecord.Count} панелей");
+            using (Transaction tx = new Transaction(doc, "Откат AR→KR (debug)"))
+            {
+                tx.Start();
+                int ok = 0, skip = 0;
+                foreach (var (krFiId, origArTypeId) in _undoRecord)
+                {
+                    try
+                    {
+                        Element e = doc.GetElement(new ElementId(krFiId));
+                        if (e == null || !e.IsValidObject) { skip++; continue; }
+                        Parameter p = e.LookupParameter("Смещение от плоскости фасада");
+                        if (p != null && !p.IsReadOnly) p.Set(0.0);
+                        if (origArTypeId > 0) e.ChangeTypeId(new ElementId(origArTypeId));
+                        ok++;
+                    }
+                    catch { skip++; }
+                }
+                tx.Commit();
+                _logger.Info($"{tag} [UNDO] ok={ok} skip={skip}");
+            }
+            _undoRecord.Clear();
+        }
+
         private void ReplaceArCurtainPanelsWithKrPanels(Document doc)
         {
             const string TAG = "[ReplaceArCurtainPanelsWithKrPanels]";
+            const string KR_OFFSET_PARAM = "Смещение от плоскости фасада";
+
+            // 0) Откат предыдущего запуска
+            UndoPreviousRun(doc, TAG);
 
             // Целевой КР-тип
             const string TARGET_KR_PANEL_FAMILY_NAME = REGULAR_PANEL_FAMILY_NAME;
@@ -410,8 +447,6 @@ namespace CWPanelsCustomizer
 
             ElementId targetTypeId = targetSymbol.Id;
 
-            const string KR_OFFSET_PARAM  = "Смещение от плоскости фасада";
-
             int replaced = 0;
             int skippedAlreadyKrType = 0;
             int skippedInvalid = 0;
@@ -420,9 +455,27 @@ namespace CWPanelsCustomizer
             int offsetsSkippedZero = 0;
             int offsetsFailed = 0;
 
+            // Маппинг Wall-панелей витража → нормаль их витражной стены.
+            // Нужен для TX2: проекция на плоскость стены вместо 3D-расстояния.
+            var panelToNormal = new Dictionary<ElementId, XYZ>();
+            {
+                var allWallPanelIds = new HashSet<ElementId>(allWallPanels.Select(w => w.Id));
+                var curtainWalls = new FilteredElementCollector(doc)
+                    .OfClass(typeof(Wall)).Cast<Wall>()
+                    .Where(w => w.CurtainGrid != null).ToList();
+                foreach (var cw in curtainWalls)
+                {
+                    XYZ n = (cw.Orientation ?? XYZ.BasisY).Normalize();
+                    foreach (var depId in cw.GetDependentElements(new ElementClassFilter(typeof(Wall))))
+                        if (allWallPanelIds.Contains(depId))
+                            panelToNormal[depId] = n;
+                }
+                _logger.Info($"{TAG} panelToNormal built: {panelToNormal.Count} Wall panels mapped");
+            }
+
             // Wall→FI замены: после ChangeTypeId старый ID инвалидируется (Revit создаёт новый элемент).
-            // Сохраняем (midpoint, offsetFt) до замены; после цикла находим новые FI по позиции.
-            var wallPendingOffsets = new List<(XYZ mid, double offsetFt)>();
+            // Сохраняем (mid, offsetFt, origArTypeId, wallNormal) до замены; после TX1 матчим по проекции.
+            var wallPendingOffsets = new List<(XYZ mid, double offsetFt, int origArTypeId, XYZ wallNormal)>();
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -456,13 +509,19 @@ namespace CWPanelsCustomizer
                             offsetFt = arOffsetParam.AsDouble();
 
                         bool isWallPanel = element is Wall;
+                        int origArTypeId = element.GetTypeId().IntegerValue;
 
                         if (isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
-                            // Сохраняем позицию: после ChangeTypeId Wall-элемент удаляется, ID меняется
+                            // Сохраняем позицию + нормаль витражной стены для TX2-матчинга
                             BoundingBoxXYZ preBb = element.get_BoundingBox(null);
                             if (preBb != null)
-                                wallPendingOffsets.Add(((preBb.Min + preBb.Max) * 0.5, offsetFt));
+                            {
+                                XYZ mid = (preBb.Min + preBb.Max) * 0.5;
+                                XYZ wallNormal = panelToNormal.TryGetValue(panelId, out var n) ? n : XYZ.BasisY;
+                                wallPendingOffsets.Add((mid, offsetFt, origArTypeId, wallNormal));
+                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} mid=({mid.X:F2},{mid.Y:F2},{mid.Z:F2}) normal=({wallNormal.X:F2},{wallNormal.Y:F2},{wallNormal.Z:F2})");
+                            }
                         }
                         else if (Math.Abs(offsetFt) < EPS)
                         {
@@ -478,6 +537,11 @@ namespace CWPanelsCustomizer
                         if (wasPinned && element.IsValidObject) element.Pinned = true;
 
                         // FI-панели: ID остаётся прежним после смены типа — переносим смещение сразу
+                        if (!isWallPanel)
+                        {
+                            // Записываем в undo даже при нулевом смещении (для отката типа)
+                            _undoRecord.Add((panelId.IntegerValue, origArTypeId));
+                        }
                         if (!isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
                             Element krElem = doc.GetElement(panelId);
@@ -486,6 +550,7 @@ namespace CWPanelsCustomizer
                             {
                                 krOffsetParam.Set(offsetFt);
                                 offsetsTransferred++;
+                                _logger.Info($"{TAG} [FI-transferred] Id={panelIdInt} offsetMm={offsetFt * FEET_TO_MM:F0}");
                             }
                             else
                             {
@@ -512,7 +577,9 @@ namespace CWPanelsCustomizer
             }
 
             // Транзакция 2: перенос смещений для Wall→FI панелей.
-            // BoundingBox новых FI-элементов становится доступен только ПОСЛЕ commit первой транзакции.
+            // BoundingBox новых FI становится доступен только ПОСЛЕ commit TX1.
+            // Матчинг по проекции на плоскость стены: убираем глубинную компоненту (offset-параметр
+            // смещает BB по нормали стены, XZ-позиция совпадает с точностью ~15 мм).
             if (wallPendingOffsets.Count > 0)
             {
                 var krFiPanels = new FilteredElementCollector(doc)
@@ -526,37 +593,54 @@ namespace CWPanelsCustomizer
                     })
                     .ToList();
 
+                _logger.Info($"{TAG} TX2: wallPending={wallPendingOffsets.Count}, krFiPool={krFiPanels.Count}");
+
                 using (Transaction tx2 = new Transaction(doc, "Transfer AR offsets to KR panels"))
                 {
                     tx2.Start();
 
-                    const double POS_TOL = 2.0; // ~600 мм: AR Wall BB смещена по глубине от KR FI BB из-за offset-параметра
-                    foreach (var (mid, offsetFt) in wallPendingOffsets)
-                    {
-                        FamilyInstance match = krFiPanels.FirstOrDefault(fi => {
-                            BoundingBoxXYZ fiBb = fi.get_BoundingBox(null);
-                            if (fiBb == null) return false;
-                            return ((fiBb.Min + fiBb.Max) * 0.5).DistanceTo(mid) < POS_TOL;
-                        });
+                    // Допуск по проекции: только в-плоскость-стены расстояние (< 30 мм)
+                    const double IN_PLANE_TOL = 0.1; // ~30 мм в футах
 
-                        if (match != null)
+                    foreach (var (mid, offsetFt, origArTypeId, wallNormal) in wallPendingOffsets)
+                    {
+                        // Находим KR FI с минимальным расстоянием в плоскости стены
+                        FamilyInstance best = null;
+                        double bestDist = double.MaxValue;
+                        foreach (var fi in krFiPanels)
                         {
-                            Parameter krP = match.LookupParameter(KR_OFFSET_PARAM);
+                            BoundingBoxXYZ fiBb = fi.get_BoundingBox(null);
+                            if (fiBb == null) continue;
+                            XYZ fiMid = (fiBb.Min + fiBb.Max) * 0.5;
+                            XYZ delta = fiMid - mid;
+                            // Убираем глубинную компоненту (вдоль нормали стены)
+                            XYZ inPlaneDelta = delta - wallNormal * delta.DotProduct(wallNormal);
+                            double dist = inPlaneDelta.GetLength();
+                            if (dist < bestDist) { bestDist = dist; best = fi; }
+                        }
+
+                        _logger.Info($"{TAG} [TX2] mid=({mid.X:F2},{mid.Y:F2},{mid.Z:F2}) offsetMm={offsetFt * FEET_TO_MM:F0} → bestId={best?.Id.IntegerValue} inPlaneMm={bestDist * FEET_TO_MM:F0}");
+
+                        if (best != null && bestDist < IN_PLANE_TOL)
+                        {
+                            Parameter krP = best.LookupParameter(KR_OFFSET_PARAM);
                             if (krP != null && !krP.IsReadOnly)
                             {
                                 krP.Set(offsetFt);
                                 offsetsTransferred++;
+                                _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
+                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} offsetMm={offsetFt * FEET_TO_MM:F0} ✓");
                             }
                             else
                             {
                                 offsetsFailed++;
-                                _logger.Info($"{TAG} Offset not transferred (Wall tx2). KRId={match.Id.IntegerValue}, paramFound={krP != null}");
+                                _logger.Info($"{TAG} [FAIL-param] KRFIId={best.Id.IntegerValue} paramFound={krP != null}");
                             }
                         }
                         else
                         {
                             offsetsFailed++;
-                            _logger.Info($"{TAG} No KR FI found near mid=({mid.X:F3},{mid.Y:F3},{mid.Z:F3}), offsetFt={offsetFt:F6}");
+                            _logger.Info($"{TAG} [NOMATCH] inPlaneMm={bestDist * FEET_TO_MM:F0} > tol={IN_PLANE_TOL * FEET_TO_MM:F0}mm");
                         }
                     }
 
