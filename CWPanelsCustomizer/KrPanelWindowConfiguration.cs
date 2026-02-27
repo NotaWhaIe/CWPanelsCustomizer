@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -16,14 +16,9 @@ namespace CWPanelsCustomizer
         public BoundingBoxXYZ WorldBoundingBox { get; set; }
         public BoundingBoxXYZ LocalBoundingBox { get; set; }
 
-        // DTO-источник истины для зеркальности панели (по ТЗ)
         public bool IsMirrored { get; set; }
-
-        // ✅ НОВОЕ: ориентация панели относительно окна (в локале витража)
         public PanelSideRelativeToOpening SideRelativeToOpening { get; set; }
             = PanelSideRelativeToOpening.Undefined;
-
-        // (опционально, но ОЧЕНЬ полезно для отладки)
         public double? DxFromOpeningCenterFt { get; set; }
     }
 
@@ -64,18 +59,19 @@ namespace CWPanelsCustomizer
         private RevitLogger _logger;
         private UIApplication _uiapp;
 
+        // --- Режим работы по выделению ---
+        private enum PluginSelectionMode { All, ByWalls, ByPanels }
+        private PluginSelectionMode _selMode = PluginSelectionMode.All;
+        private HashSet<ElementId> _selectedWallIds;   // ByWalls
+        private HashSet<ElementId> _selectedPanelIds;  // ByPanels
+
         private const double EPS = 1e-9;
         private const double FEET_TO_MM = 304.8;
 
 
-        // ГЛОБАЛЬНОЕ УПРАВЛЕНИЕ РАЗМЕРОМ ОКОННОГО ВЫРЕЗА (мм)
-        // сделать, чтоб тут нужно было ввести 10
         private const double WINDOW_CUTOUT_SCALE = 0.0;
 
-
-        // Имена панелей
         private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Уголвая_В2.1";
-        // private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Рядовая_В3";//старый вариант
         private const string REGULAR_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         private const string G_PANEL_FAMILY_NAME = "КРСТ_НВФ_С Г-образным вырезом_В2";
@@ -117,6 +113,7 @@ namespace CWPanelsCustomizer
 
         private void RunPlugin()
         {
+            DetectSelectionMode();
             using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
             {
                 tg.Start();
@@ -160,6 +157,55 @@ namespace CWPanelsCustomizer
             }
         }
 
+        private void DetectSelectionMode()
+        {
+            _selMode = PluginSelectionMode.All;
+            _selectedWallIds = null;
+            _selectedPanelIds = null;
+
+            var selectedIds = _uidoc.Selection.GetElementIds().ToList();
+            if (selectedIds.Count == 0)
+            {
+                _logger.Info("[Selection] Mode=All (nothing selected)");
+                return;
+            }
+
+            // Витражи?
+            var selectedWalls = selectedIds
+                .Select(id => _doc.GetElement(id) as Wall)
+                .Where(w => w != null && w.CurtainGrid != null)
+                .ToList();
+
+            if (selectedWalls.Count > 0)
+            {
+                _selMode = PluginSelectionMode.ByWalls;
+                _selectedWallIds = new HashSet<ElementId>(selectedWalls.Select(w => w.Id));
+                _logger.Info($"[Selection] Mode=ByWalls, walls={_selectedWallIds.Count}");
+                return;
+            }
+
+            // Панели витража?
+            var panelCategoryId = new ElementId((int)BuiltInCategory.OST_CurtainWallPanels);
+            var selectedPanels = selectedIds
+                .Where(id =>
+                {
+                    Element e = _doc.GetElement(id);
+                    return e != null && e.Category != null && e.Category.Id == panelCategoryId;
+                })
+                .ToList();
+
+            if (selectedPanels.Count > 0)
+            {
+                _selMode = PluginSelectionMode.ByPanels;
+                _selectedPanelIds = new HashSet<ElementId>(selectedPanels);
+                _logger.Info($"[Selection] Mode=ByPanels, panels={_selectedPanelIds.Count}");
+                return;
+            }
+
+            // Выделено что-то другое → по всему проекту
+            _logger.Info($"[Selection] Mode=All (selected {selectedIds.Count} non-CW elements)");
+        }
+
         private void ReplaceArCurtainPanelsWithKrPanels(Document doc)
         {
             const string TAG = "[ReplaceArCurtainPanelsWithKrPanels]";
@@ -181,20 +227,52 @@ namespace CWPanelsCustomizer
             }
 
             // 1a) Wall-панели витража
-            List<ElementId> wallPanelIds = new FilteredElementCollector(doc)
+            // 1b) FamilyInstance-панели витража (напр. "Системная панель / Кассета_RAL 5005")
+            List<ElementId> wallPanelIds;
+            List<ElementId> fiPanelIds;
+
+            // Собираем панели через тот же коллектор что Mode=All — стабильный источник
+            var allWallPanels = new FilteredElementCollector(doc)
                 .OfCategory(BuiltInCategory.OST_CurtainWallPanels)
                 .WhereElementIsNotElementType()
                 .OfType<Wall>()
-                .Select(w => w.Id)
                 .ToList();
 
-            // 1b) FamilyInstance-панели витража (напр. "Системная панель / Кассета_RAL 5005")
-            List<ElementId> fiPanelIds = new FilteredElementCollector(doc)
+            var allFiPanels = new FilteredElementCollector(doc)
                 .OfCategory(BuiltInCategory.OST_CurtainWallPanels)
                 .WhereElementIsNotElementType()
                 .OfType<FamilyInstance>()
-                .Select(fi => fi.Id)
                 .ToList();
+
+            if (_selMode == PluginSelectionMode.ByWalls && _selectedWallIds != null && _selectedWallIds.Count > 0)
+            {
+                // FI-панели: фильтруем по Host (родительский витраж)
+                fiPanelIds = allFiPanels
+                    .Where(fi => fi.Host != null && _selectedWallIds.Contains(fi.Host.Id))
+                    .Select(fi => fi.Id)
+                    .ToList();
+
+                // Wall-панели: через GetDependentElements, т.к. GetPanelIds() их не возвращает
+                var wallPanelSet = new HashSet<ElementId>();
+                foreach (ElementId wallId in _selectedWallIds)
+                {
+                    Wall cw = doc.GetElement(wallId) as Wall;
+                    if (cw == null) continue;
+                    // GetDependentElements(Wall) включает Wall-панели витража
+                    foreach (ElementId depId in cw.GetDependentElements(new ElementClassFilter(typeof(Wall))))
+                        wallPanelSet.Add(depId);
+                }
+                // Пересекаем с allWallPanels (уже отфильтровано: OST_CurtainWallPanels)
+                wallPanelIds = allWallPanels
+                    .Where(w => wallPanelSet.Contains(w.Id))
+                    .Select(w => w.Id)
+                    .ToList();
+            }
+            else
+            {
+                wallPanelIds = allWallPanels.Select(w => w.Id).ToList();
+                fiPanelIds = allFiPanels.Select(fi => fi.Id).ToList();
+            }
 
             _logger.Info($"{TAG} Found Wall panels: {wallPanelIds.Count}, FamilyInstance panels: {fiPanelIds.Count}");
 
@@ -257,10 +335,26 @@ namespace CWPanelsCustomizer
 
             _logger.Info($"{TAG} AR panels total: {arPanelIds.Count} (skippedNotAr={skippedNotAr}, skippedInvalid={skippedInvalidAtScan})");
 
-            // Если АР панелей нет — просто выходим (как ты и просил)
+            // Режим ByPanels: оставляем только выделенные
+            if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
+            {
+                int before = arPanelIds.Count;
+                arPanelIds = arPanelIds.Where(id => _selectedPanelIds.Contains(id)).ToList();
+                _logger.Info($"{TAG} ByPanels filter: {before} → {arPanelIds.Count} AR panels");
+            }
+
+            // Если АР панелей нет — логируем диагностику и выходим
             if (arPanelIds.Count == 0)
             {
-                _logger.Info($"{TAG} No AR panels to replace. Skip method.");
+                // Диагностика: какие семейства/типы есть в области поиска
+                var sampleFamilies = allFiPanels
+                    .Where(fi => _selMode != PluginSelectionMode.ByWalls ||
+                                 (_selectedWallIds != null && fi.Host != null && _selectedWallIds.Contains(fi.Host.Id)))
+                    .GroupBy(fi => $"{fi.Symbol?.FamilyName}/{fi.Symbol?.Name}")
+                    .OrderByDescending(g => g.Count())
+                    .Take(5)
+                    .Select(g => $"{g.Key} ×{g.Count()}");
+                _logger.Info($"{TAG} No AR panels. Top families in scope: {string.Join("; ", sampleFamilies)}");
                 return;
             }
 
@@ -1013,275 +1107,6 @@ namespace CWPanelsCustomizer
                             $"cutoutPanelsUpdated={cutoutPanelsUpdated}, paramsSet={paramsSet}");
         }
 
-
-        //private void ReplaceRegularPanelsWithCutoutPanels(List<CurtainWallDataDto> data)
-        //{
-        //    const string REGULAR_FAMILY = REGULAR_PANEL_FAMILY_NAME;
-
-        //    const string CUTOUT_TOP_FAMILY = G_PANEL_FAMILY_NAME;
-        //    const string CUTOUT_TOP_FAMILY_TYPE = G_PANEL_FAMILY_NAME_TYPE;
-
-
-        //    const string CUTOUT_BOTTOM_FAMILY = L_PANEL_FAMILY_NAME;
-        //    const string CUTOUT_BOTTOM_TYPE = L_PANEL_FAMILY_NAME_TYPE;
-
-
-
-
-
-        //    const double CHECK_SEGMENT_LENGTH_FT = 0.328084;
-        //    const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;
-
-        //    _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] START");
-
-        //    if (data == null || data.Count == 0)
-        //    {
-        //        _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
-        //        return;
-        //    }
-
-        //    XYZ GetCenter(BoundingBoxXYZ b) =>
-        //        new XYZ((b.Min.X + b.Max.X) * 0.5, (b.Min.Y + b.Max.Y) * 0.5, (b.Min.Z + b.Max.Z) * 0.5);
-
-        //    BoundingBoxXYZ Reduce(BoundingBoxXYZ b, double factor)
-        //    {
-        //        var c = GetCenter(b);
-        //        double hx = (b.Max.X - b.Min.X) * 0.5 * factor;
-        //        double hy = (b.Max.Y - b.Min.Y) * 0.5 * factor;
-        //        double hz = (b.Max.Z - b.Min.Z) * 0.5 * factor;
-
-        //        return new BoundingBoxXYZ
-        //        {
-        //            Min = new XYZ(c.X - hx, c.Y - hy, c.Z - hz),
-        //            Max = new XYZ(c.X + hx, c.Y + hy, c.Z + hz)
-        //        };
-        //    }
-
-        //    bool BBoxIntersect(BoundingBoxXYZ a, BoundingBoxXYZ b)
-        //    {
-        //        if (a == null || b == null) return false;
-        //        return a.Min.X <= b.Max.X && a.Max.X >= b.Min.X
-        //            && a.Min.Y <= b.Max.Y && a.Max.Y >= b.Min.Y
-        //            && a.Min.Z <= b.Max.Z && a.Max.Z >= b.Min.Z;
-        //    }
-
-        //    bool PointInRect2D(XYZ p, double minX, double maxX, double minZ, double maxZ) =>
-        //        p.X >= minX && p.X <= maxX && p.Z >= minZ && p.Z <= maxZ;
-
-        //    double Cross2D(XYZ a, XYZ b, XYZ c)
-        //    {
-        //        double abx = b.X - a.X;
-        //        double abz = b.Z - a.Z;
-        //        double acx = c.X - a.X;
-        //        double acz = c.Z - a.Z;
-        //        return abx * acz - abz * acx;
-        //    }
-
-        //    bool SegmentsIntersect2D(XYZ a, XYZ b, XYZ c, XYZ d)
-        //    {
-        //        const double E = 1e-9;
-
-        //        double d1 = Cross2D(a, b, c);
-        //        double d2 = Cross2D(a, b, d);
-        //        double d3 = Cross2D(c, d, a);
-        //        double d4 = Cross2D(c, d, b);
-
-        //        bool Proper = ((d1 > E && d2 < -E) || (d1 < -E && d2 > E)) &&
-        //                      ((d3 > E && d4 < -E) || (d3 < -E && d4 > E));
-
-        //        if (Proper) return true;
-
-        //        bool OnSeg(XYZ p, XYZ q, XYZ r)
-        //        {
-        //            return q.X >= Math.Min(p.X, r.X) - E && q.X <= Math.Max(p.X, r.X) + E &&
-        //                   q.Z >= Math.Min(p.Z, r.Z) - E && q.Z <= Math.Max(p.Z, r.Z) + E;
-        //        }
-
-        //        bool Collinear(double val) => Math.Abs(val) <= E;
-
-        //        if (Collinear(d1) && OnSeg(a, c, b)) return true;
-        //        if (Collinear(d2) && OnSeg(a, d, b)) return true;
-        //        if (Collinear(d3) && OnSeg(c, a, d)) return true;
-        //        if (Collinear(d4) && OnSeg(c, b, d)) return true;
-
-        //        return false;
-        //    }
-
-        //    bool SegmentIntersectsRect2D(XYZ p1, XYZ p2, BoundingBoxXYZ panelBox)
-        //    {
-        //        if (panelBox == null) return false;
-
-        //        double minX = Math.Min(panelBox.Min.X, panelBox.Max.X);
-        //        double maxX = Math.Max(panelBox.Min.X, panelBox.Max.X);
-        //        double minZ = Math.Min(panelBox.Min.Z, panelBox.Max.Z);
-        //        double maxZ = Math.Max(panelBox.Min.Z, panelBox.Max.Z);
-
-        //        if (PointInRect2D(p1, minX, maxX, minZ, maxZ)) return true;
-        //        if (PointInRect2D(p2, minX, maxX, minZ, maxZ)) return true;
-
-        //        var r1 = new XYZ(minX, 0, minZ);
-        //        var r2 = new XYZ(maxX, 0, minZ);
-        //        var r3 = new XYZ(maxX, 0, maxZ);
-        //        var r4 = new XYZ(minX, 0, maxZ);
-
-        //        if (SegmentsIntersect2D(p1, p2, r1, r2)) return true;
-        //        if (SegmentsIntersect2D(p1, p2, r2, r3)) return true;
-        //        if (SegmentsIntersect2D(p1, p2, r3, r4)) return true;
-        //        if (SegmentsIntersect2D(p1, p2, r4, r1)) return true;
-
-        //        return false;
-        //    }
-
-        //    List<FamilyInstance> GetHitPanelsBySegment2D(List<(FamilyInstance fi, BoundingBoxXYZ bbox)> panels, XYZ s1, XYZ s2)
-        //    {
-        //        var res = new List<FamilyInstance>();
-        //        foreach (var p in panels)
-        //        {
-        //            if (SegmentIntersectsRect2D(s1, s2, p.bbox))
-        //                res.Add(p.fi);
-        //        }
-        //        return res;
-        //    }
-
-        //    var topSymbol = GetFamilySymbolByName(CUTOUT_TOP_FAMILY);
-        //    var bottomSymbol = GetFamilySymbolByName(CUTOUT_BOTTOM_FAMILY);
-
-        //    if (topSymbol == null || bottomSymbol == null)
-        //    {
-        //        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found. Top null={topSymbol == null}, Bottom null={bottomSymbol == null}");
-        //        TaskDialog.Show("Ошибка", "Не найдены семейства для замены угловых панелей (проверь имена семейств в проекте).");
-        //        return;
-        //    }
-
-        //    int openingsProcessed = 0;
-        //    int replaced = 0;
-
-        //    var alreadyReplaced = new HashSet<ElementId>();
-
-        //    using (var t = new Transaction(_doc, "Замена рядовых панелей на угловые"))
-        //    {
-        //        t.Start();
-
-        //        if (!topSymbol.IsActive) topSymbol.Activate();
-        //        if (!bottomSymbol.IsActive) bottomSymbol.Activate();
-
-        //        foreach (var wallData in data)
-        //        {
-        //            if (wallData?.CurtainWallElement == null)
-        //                continue;
-
-        //            var openings = wallData.IntersectingOpenings ?? new List<OpeningModelDto>();
-        //            var panels = wallData.Panels ?? new List<CurtainWallPanelDto>();
-
-        //            var regularPanels = panels
-        //                .Where(p => p?.PanelElement != null)
-        //                .Where(p => p.PanelElement.Symbol?.Family?.Name?.Contains(REGULAR_FAMILY) == true)
-        //                .ToList();
-
-        //            if (openings.Count == 0 || regularPanels.Count == 0)
-        //                continue;
-
-        //            foreach (var opening in openings)
-        //            {
-        //                if (opening?.OpeningElement == null)
-        //                    continue;
-
-        //                var ob = opening.LocalBoundingBox;
-        //                if (ob == null)
-        //                    continue;
-
-        //                openingsProcessed++;
-
-        //                var candidate = new List<(FamilyInstance fi, BoundingBoxXYZ bbox)>();
-        //                foreach (var p in regularPanels)
-        //                {
-        //                    var pb = p.LocalBoundingBox;
-        //                    if (pb == null) continue;
-
-        //                    var reduced = Reduce(pb, PANEL_BBOX_REDUCTION_FACTOR);
-        //                    if (BBoxIntersect(ob, reduced))
-        //                        candidate.Add((p.PanelElement, reduced));
-        //                }
-
-        //                if (candidate.Count == 0)
-        //                    continue;
-
-        //                var windowCornerTL = new XYZ(ob.Min.X, 0, ob.Max.Z);
-        //                var windowCornerTR = new XYZ(ob.Max.X, 0, ob.Max.Z);
-        //                var windowCornerBL = new XYZ(ob.Min.X, 0, ob.Min.Z);
-        //                var windowCornerBR = new XYZ(ob.Max.X, 0, ob.Min.Z);
-
-        //                var corners = new List<(XYZ corner, XYZ dirV, XYZ dirH)>
-        //                {
-        //                    (windowCornerTL, new XYZ(0,0, 1), new XYZ(-1,0,0)),
-        //                    (windowCornerTR, new XYZ(0,0, 1), new XYZ( 1,0,0)),
-        //                    (windowCornerBL, new XYZ(0,0,-1), new XYZ(-1,0,0)),
-        //                    (windowCornerBR, new XYZ(0,0,-1), new XYZ( 1,0,0)),
-        //                };
-
-        //                var panelsToReplace = new HashSet<FamilyInstance>();
-
-        //                foreach (var c in corners)
-        //                {
-        //                    var p1v = c.corner;
-        //                    var p2v = c.corner + c.dirV * CHECK_SEGMENT_LENGTH_FT;
-
-        //                    var p1h = c.corner;
-        //                    var p2h = c.corner + c.dirH * CHECK_SEGMENT_LENGTH_FT;
-
-        //                    var hitV = GetHitPanelsBySegment2D(candidate, p1v, p2v);
-        //                    var hitH = GetHitPanelsBySegment2D(candidate, p1h, p2h);
-
-        //                    var common = hitV.Intersect(hitH).ToList();
-        //                    foreach (var fi in common)
-        //                        panelsToReplace.Add(fi);
-        //                }
-
-        //                if (panelsToReplace.Count == 0)
-        //                    continue;
-
-        //                var windowCenter = GetCenter(ob);
-
-        //                foreach (var panelFi in panelsToReplace)
-        //                {
-        //                    if (panelFi == null) continue;
-        //                    if (alreadyReplaced.Contains(panelFi.Id)) continue;
-
-        //                    var pbDto = regularPanels.FirstOrDefault(x => x.PanelElement?.Id == panelFi.Id)?.LocalBoundingBox;
-        //                    if (pbDto == null) continue;
-
-        //                    var panelCenter = GetCenter(pbDto);
-        //                    bool isTop = panelCenter.Z > windowCenter.Z;
-
-        //                    var target = isTop ? topSymbol : bottomSymbol;
-
-        //                    try
-        //                    {
-        //                        if (panelFi.Symbol != null && panelFi.Symbol.Id == target.Id)
-        //                        {
-        //                            alreadyReplaced.Add(panelFi.Id);
-        //                            continue;
-        //                        }
-
-        //                        panelFi.Symbol = target;
-        //                        alreadyReplaced.Add(panelFi.Id);
-        //                        replaced++;
-        //                    }
-        //                    catch (Exception ex)
-        //                    {
-        //                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
-        //                    }
-        //                }
-        //            }
-        //        }
-
-        //        t.Commit();
-        //    }
-
-        //    _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
-        //}
-
-
         private void ReplaceRegularPanelsWithCutoutPanels(List<CurtainWallDataDto> data)
         {
             const string REGULAR_FAMILY = REGULAR_PANEL_FAMILY_NAME;
@@ -1831,6 +1656,28 @@ namespace CWPanelsCustomizer
                 .Cast<Wall>()
                 .Where(w => w != null && w.CurtainGrid != null)
                 .ToList();
+
+            // Фильтр по выделению
+            if (_selMode == PluginSelectionMode.ByWalls && _selectedWallIds != null && _selectedWallIds.Count > 0)
+            {
+                allCurtainWalls = allCurtainWalls.Where(w => _selectedWallIds.Contains(w.Id)).ToList();
+                _logger.Info($"[CWPanelsCustomizer] ByWalls filter → {allCurtainWalls.Count} walls");
+            }
+            else if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
+            {
+                // Находим родительские витражи для выделенных панелей
+                var parentIds = new HashSet<ElementId>();
+                foreach (Wall w in allCurtainWalls)
+                {
+                    if (w.CurtainGrid == null) continue;
+                    foreach (ElementId pid in w.CurtainGrid.GetPanelIds())
+                    {
+                        if (_selectedPanelIds.Contains(pid)) { parentIds.Add(w.Id); break; }
+                    }
+                }
+                allCurtainWalls = allCurtainWalls.Where(w => parentIds.Contains(w.Id)).ToList();
+                _logger.Info($"[CWPanelsCustomizer] ByPanels filter → {allCurtainWalls.Count} parent walls");
+            }
 
             _logger.Info($"[CWPanelsCustomizer] allCurtainWalls={allCurtainWalls.Count}");
 
