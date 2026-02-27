@@ -474,8 +474,9 @@ namespace CWPanelsCustomizer
             }
 
             // Wall→FI замены: после ChangeTypeId старый ID инвалидируется (Revit создаёт новый элемент).
-            // Сохраняем (mid, offsetFt, origArTypeId, wallNormal) до замены; после TX1 матчим по проекции.
-            var wallPendingOffsets = new List<(XYZ mid, double offsetFt, int origArTypeId, XYZ wallNormal)>();
+            // Сохраняем BB (Min/Max) до замены; после TX1 матчим по перекрытию BoundingBox в плоскости стены.
+            // BB-overlap не зависит от систематического смещения центров (~16мм) — нужна только > 50% площадь.
+            var wallPendingOffsets = new List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal)>();
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -513,14 +514,13 @@ namespace CWPanelsCustomizer
 
                         if (isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
-                            // Сохраняем позицию + нормаль витражной стены для TX2-матчинга
+                            // Сохраняем BB + нормаль витражной стены для TX2-матчинга по перекрытию
                             BoundingBoxXYZ preBb = element.get_BoundingBox(null);
                             if (preBb != null)
                             {
-                                XYZ mid = (preBb.Min + preBb.Max) * 0.5;
                                 XYZ wallNormal = panelToNormal.TryGetValue(panelId, out var n) ? n : XYZ.BasisY;
-                                wallPendingOffsets.Add((mid, offsetFt, origArTypeId, wallNormal));
-                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} mid=({mid.X:F2},{mid.Y:F2},{mid.Z:F2}) normal=({wallNormal.X:F2},{wallNormal.Y:F2},{wallNormal.Z:F2})");
+                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal));
+                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
                             }
                         }
                         else if (Math.Abs(offsetFt) < EPS)
@@ -599,29 +599,46 @@ namespace CWPanelsCustomizer
                 {
                     tx2.Start();
 
-                    // Допуск по проекции: только в-плоскость-стены расстояние (< 30 мм)
-                    const double IN_PLANE_TOL = 0.1; // ~30 мм в футах
+                    // Матчинг по перекрытию BoundingBox в плоскости стены.
+                    // Горизонтальная ось в плоскости: xVec = (-n.Y, n.X, 0).
+                    // Вертикальная ось: BasisZ (витражи всегда вертикальны).
+                    // AR-панель и соответствующая KR-панель занимают одну ячейку сетки → overlap ≈ 100%.
+                    // Соседние ячейки не пересекаются → overlap = 0. Порог: 50%.
+                    const double MIN_OVERLAP = 0.5;
 
-                    foreach (var (mid, offsetFt, origArTypeId, wallNormal) in wallPendingOffsets)
+                    foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal) in wallPendingOffsets)
                     {
-                        // Находим KR FI с минимальным расстоянием в плоскости стены
+                        // Горизонтальная ось в плоскости стены
+                        XYZ xVec = new XYZ(-wallNormal.Y, wallNormal.X, 0).Normalize();
+
+                        // Проекция AR BB на плоскость стены (горизонталь + высота Z)
+                        double arH1 = bbMin.DotProduct(xVec), arH2 = bbMax.DotProduct(xVec);
+                        double arHmin = Math.Min(arH1, arH2), arHmax = Math.Max(arH1, arH2);
+                        double arVmin = bbMin.Z, arVmax = bbMax.Z;
+                        double arArea = (arHmax - arHmin) * (arVmax - arVmin);
+
                         FamilyInstance best = null;
-                        double bestDist = double.MaxValue;
+                        double bestOverlap = 0;
+
                         foreach (var fi in krFiPanels)
                         {
                             BoundingBoxXYZ fiBb = fi.get_BoundingBox(null);
                             if (fiBb == null) continue;
-                            XYZ fiMid = (fiBb.Min + fiBb.Max) * 0.5;
-                            XYZ delta = fiMid - mid;
-                            // Убираем глубинную компоненту (вдоль нормали стены)
-                            XYZ inPlaneDelta = delta - wallNormal * delta.DotProduct(wallNormal);
-                            double dist = inPlaneDelta.GetLength();
-                            if (dist < bestDist) { bestDist = dist; best = fi; }
+
+                            double fiH1 = fiBb.Min.DotProduct(xVec), fiH2 = fiBb.Max.DotProduct(xVec);
+                            double fiHmin = Math.Min(fiH1, fiH2), fiHmax = Math.Max(fiH1, fiH2);
+                            double fiVmin = fiBb.Min.Z, fiVmax = fiBb.Max.Z;
+
+                            double overlapH = Math.Max(0, Math.Min(arHmax, fiHmax) - Math.Max(arHmin, fiHmin));
+                            double overlapV = Math.Max(0, Math.Min(arVmax, fiVmax) - Math.Max(arVmin, fiVmin));
+                            double overlapFrac = arArea > 0 ? (overlapH * overlapV) / arArea : 0;
+
+                            if (overlapFrac > bestOverlap) { bestOverlap = overlapFrac; best = fi; }
                         }
 
-                        _logger.Info($"{TAG} [TX2] mid=({mid.X:F2},{mid.Y:F2},{mid.Z:F2}) offsetMm={offsetFt * FEET_TO_MM:F0} → bestId={best?.Id.IntegerValue} inPlaneMm={bestDist * FEET_TO_MM:F0}");
+                        _logger.Info($"{TAG} [TX2] offsetMm={offsetFt * FEET_TO_MM:F0} → bestId={best?.Id.IntegerValue} overlap={bestOverlap:P0}");
 
-                        if (best != null && bestDist < IN_PLANE_TOL)
+                        if (best != null && bestOverlap >= MIN_OVERLAP)
                         {
                             Parameter krP = best.LookupParameter(KR_OFFSET_PARAM);
                             if (krP != null && !krP.IsReadOnly)
@@ -629,7 +646,7 @@ namespace CWPanelsCustomizer
                                 krP.Set(offsetFt);
                                 offsetsTransferred++;
                                 _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
-                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} offsetMm={offsetFt * FEET_TO_MM:F0} ✓");
+                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
                             }
                             else
                             {
@@ -640,7 +657,7 @@ namespace CWPanelsCustomizer
                         else
                         {
                             offsetsFailed++;
-                            _logger.Info($"{TAG} [NOMATCH] inPlaneMm={bestDist * FEET_TO_MM:F0} > tol={IN_PLANE_TOL * FEET_TO_MM:F0}mm");
+                            _logger.Info($"{TAG} [NOMATCH] bestOverlap={bestOverlap:P0} < {MIN_OVERLAP:P0}");
                         }
                     }
 
