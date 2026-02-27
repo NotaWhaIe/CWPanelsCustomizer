@@ -420,6 +420,10 @@ namespace CWPanelsCustomizer
             int offsetsSkippedZero = 0;
             int offsetsFailed = 0;
 
+            // Wall→FI замены: после ChangeTypeId старый ID инвалидируется (Revit создаёт новый элемент).
+            // Сохраняем (midpoint, offsetFt) до замены; после цикла находим новые FI по позиции.
+            var wallPendingOffsets = new List<(XYZ mid, double offsetFt)>();
+
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
                 tx.Start();
@@ -451,6 +455,20 @@ namespace CWPanelsCustomizer
                         if (arOffsetParam != null && arOffsetParam.StorageType == StorageType.Double)
                             offsetFt = arOffsetParam.AsDouble();
 
+                        bool isWallPanel = element is Wall;
+
+                        if (isWallPanel && Math.Abs(offsetFt) >= EPS)
+                        {
+                            // Сохраняем позицию: после ChangeTypeId Wall-элемент удаляется, ID меняется
+                            BoundingBoxXYZ preBb = element.get_BoundingBox(null);
+                            if (preBb != null)
+                                wallPendingOffsets.Add(((preBb.Min + preBb.Max) * 0.5, offsetFt));
+                        }
+                        else if (Math.Abs(offsetFt) < EPS)
+                        {
+                            offsetsSkippedZero++;
+                        }
+
                         bool wasPinned = element.Pinned;
                         if (wasPinned) element.Pinned = false;
 
@@ -459,15 +477,11 @@ namespace CWPanelsCustomizer
 
                         if (wasPinned && element.IsValidObject) element.Pinned = true;
 
-                        // Переносим смещение на КР-панель
-                        if (Math.Abs(offsetFt) < EPS)
+                        // FI-панели: ID остаётся прежним после смены типа — переносим смещение сразу
+                        if (!isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
-                            offsetsSkippedZero++;
-                        }
-                        else
-                        {
-                            FamilyInstance krFi = doc.GetElement(panelId) as FamilyInstance;
-                            Parameter krOffsetParam = krFi?.LookupParameter(KR_OFFSET_PARAM);
+                            Element krElem = doc.GetElement(panelId);
+                            Parameter krOffsetParam = krElem?.LookupParameter(KR_OFFSET_PARAM);
                             if (krOffsetParam != null && !krOffsetParam.IsReadOnly)
                             {
                                 krOffsetParam.Set(offsetFt);
@@ -476,7 +490,7 @@ namespace CWPanelsCustomizer
                             else
                             {
                                 offsetsFailed++;
-                                _logger.Info($"{TAG} Offset not transferred. PanelId={panelIdInt}, offsetFt={offsetFt:F6}, krFi={krFi != null}, paramFound={krOffsetParam != null}");
+                                _logger.Info($"{TAG} Offset not transferred (FI). PanelId={panelIdInt}, offsetFt={offsetFt:F6}, paramFound={krOffsetParam != null}");
                             }
                         }
 
@@ -495,6 +509,59 @@ namespace CWPanelsCustomizer
                 }
 
                 tx.Commit();
+            }
+
+            // Транзакция 2: перенос смещений для Wall→FI панелей.
+            // BoundingBox новых FI-элементов становится доступен только ПОСЛЕ commit первой транзакции.
+            if (wallPendingOffsets.Count > 0)
+            {
+                var krFiPanels = new FilteredElementCollector(doc)
+                    .OfClass(typeof(FamilyInstance))
+                    .OfCategory(BuiltInCategory.OST_CurtainWallPanels)
+                    .Cast<FamilyInstance>()
+                    .Where(fi => {
+                        string fam = fi.Symbol?.Family?.Name ?? string.Empty;
+                        return string.Equals(fam, TARGET_KR_PANEL_FAMILY_NAME, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(fi.Symbol.Name, TARGET_KR_PANEL_TYPE_NAME, StringComparison.OrdinalIgnoreCase);
+                    })
+                    .ToList();
+
+                using (Transaction tx2 = new Transaction(doc, "Transfer AR offsets to KR panels"))
+                {
+                    tx2.Start();
+
+                    const double POS_TOL = 2.0; // ~600 мм: AR Wall BB смещена по глубине от KR FI BB из-за offset-параметра
+                    foreach (var (mid, offsetFt) in wallPendingOffsets)
+                    {
+                        FamilyInstance match = krFiPanels.FirstOrDefault(fi => {
+                            BoundingBoxXYZ fiBb = fi.get_BoundingBox(null);
+                            if (fiBb == null) return false;
+                            return ((fiBb.Min + fiBb.Max) * 0.5).DistanceTo(mid) < POS_TOL;
+                        });
+
+                        if (match != null)
+                        {
+                            Parameter krP = match.LookupParameter(KR_OFFSET_PARAM);
+                            if (krP != null && !krP.IsReadOnly)
+                            {
+                                krP.Set(offsetFt);
+                                offsetsTransferred++;
+                            }
+                            else
+                            {
+                                offsetsFailed++;
+                                _logger.Info($"{TAG} Offset not transferred (Wall tx2). KRId={match.Id.IntegerValue}, paramFound={krP != null}");
+                            }
+                        }
+                        else
+                        {
+                            offsetsFailed++;
+                            _logger.Info($"{TAG} No KR FI found near mid=({mid.X:F3},{mid.Y:F3},{mid.Z:F3}), offsetFt={offsetFt:F6}");
+                        }
+                    }
+
+                    tx2.Commit();
+                }
             }
 
             _logger.Info($"{TAG} SUMMARY:");
