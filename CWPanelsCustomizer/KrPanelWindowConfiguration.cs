@@ -5,6 +5,7 @@ using System.Linq;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using CWPanelsCustomizer.Helpers;
 
 namespace CWPanelsCustomizer
 {
@@ -60,6 +61,7 @@ namespace CWPanelsCustomizer
 
         private UIDocument _uidoc;
         private Document _doc;
+        private RevitLogger _logger;
 
         private const double EPS = 1e-9;
         private const double FEET_TO_MM = 304.8;
@@ -71,8 +73,8 @@ namespace CWPanelsCustomizer
 
 
         // Имена панелей
-        //private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Уголвая_В2.1";
-        private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Рядовая_В3";//старый вариант
+        private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Уголвая_В2.1";
+        // private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Рядовая_В3";//старый вариант
         private const string REGULAR_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         private const string G_PANEL_FAMILY_NAME = "КРСТ_НВФ_С Г-образным вырезом_В2";
@@ -86,8 +88,30 @@ namespace CWPanelsCustomizer
             _uidoc = commandData.Application.ActiveUIDocument;
             _doc = _uidoc.Document;
 
-            Debug.WriteLine("[CWPanelsCustomizer] Execute START");
+            _logger = RevitLogger.GetLogger(_doc);
+            _logger.BeginSession(IS_NAME, _doc.Title);
 
+            Stopwatch sw = Stopwatch.StartNew();
+
+            try
+            {
+                RunPlugin();
+                _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
+                _logger.EndSession("Succeeded");
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("FAILED", ex);
+                _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
+                _logger.EndSession("Failed");
+                throw;
+            }
+
+            return Result.Succeeded;
+        }
+
+        private void RunPlugin()
+        {
             using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
             {
                 tg.Start();
@@ -98,13 +122,16 @@ namespace CWPanelsCustomizer
                 // 2) Сбор данных
                 List<CurtainWallDataDto> data = GetElements(_doc);
 
+                // 2.5) Конвертация панелей внутри проёмов в пустые
+                ConvertPanelsInsideOpeningsToEmpty(data);
+
                 // 3) Сброс подрезок рядовых панелей по пересечению с проёмами
                 ResetRegularPanelsCutsForIntersectingOpenings(data);
 
                 // 4) Замена рядовых панелей на угловые (где нужно)
                 ReplaceRegularPanelsWithCutoutPanels(data);
 
-                // 5) НОВОЕ: отзеркаливание панелей справа от окна, пересекающихся с BB окна
+                // 5) Отзеркаливание панелей справа от окна, пересекающихся с BB окна
                 MirrorPanelsRightOfOpenings(data);
 
                 // 6) Подрезки рядовых панелей
@@ -113,23 +140,19 @@ namespace CWPanelsCustomizer
                 // 7) Настройка угловых панелей по значениям рядовых
                 CalculateAndSetCutoutPanelsCuts(data);
 
-
                 int totalOpenings = GetTotalOpeningsCount(_doc);
                 int totalCurtainWalls = GetTotalCurtainWallsCount(_doc);
                 int wallsInWork = data.Count;
                 int totalAssignedOpenings = data.Sum(x => x.IntersectingOpenings.Count);
 
-                Debug.WriteLine("[CWPanelsCustomizer] Summary:");
-                Debug.WriteLine($"[CWPanelsCustomizer] Total openings: {totalOpenings}");
-                Debug.WriteLine($"[CWPanelsCustomizer] Total curtain walls: {totalCurtainWalls}");
-                Debug.WriteLine($"[CWPanelsCustomizer] Walls in work: {wallsInWork}");
-                Debug.WriteLine($"[CWPanelsCustomizer] Total assigned openings: {totalAssignedOpenings}");
+                _logger.LogSummary("Result",
+                    ("TotalOpenings", totalOpenings),
+                    ("TotalCurtainWalls", totalCurtainWalls),
+                    ("WallsInWork", wallsInWork),
+                    ("AssignedOpenings", totalAssignedOpenings));
 
                 tg.Assimilate();
             }
-
-            Debug.WriteLine("[CWPanelsCustomizer] Execute END");
-            return Result.Succeeded;
         }
 
         private void ReplaceArCurtainPanelsWithKrPanels(Document doc)
@@ -140,69 +163,92 @@ namespace CWPanelsCustomizer
             const string TARGET_KR_PANEL_FAMILY_NAME = REGULAR_PANEL_FAMILY_NAME;
             const string TARGET_KR_PANEL_TYPE_NAME = REGULAR_PANEL_FAMILY_NAME_TYPE;
 
-            // Критерий "АР-панели" (по твоему RevitLookup: WallType = "AP_Кассета")
-            // Если у тебя есть другой префикс/правило — меняй только эту константу/проверку ниже.
+            // Критерий "АР-панели":
+            // AP_ / АР   — стандартные АР-типы
+            // Кассета     — системные панели (Системная панель / Кассета_RAL 5005)
             const string AR_TYPE_PREFIX_1 = "AP_";
             const string AR_TYPE_PREFIX_2 = "АР";
+            const string AR_TYPE_PREFIX_3 = "Кассета";
 
             if (doc == null)
             {
                 throw new ArgumentNullException(nameof(doc));
             }
 
-            // 1) Собираем ВСЕ панели витража (как Wall), но работаем только с Id
-            List<ElementId> allPanelIds = new FilteredElementCollector(doc)
+            // 1a) Wall-панели витража
+            List<ElementId> wallPanelIds = new FilteredElementCollector(doc)
                 .OfCategory(BuiltInCategory.OST_CurtainWallPanels)
                 .WhereElementIsNotElementType()
                 .OfType<Wall>()
                 .Select(w => w.Id)
                 .ToList();
 
-            Debug.WriteLine($"{TAG} Found panels (total): {allPanelIds.Count}");
+            // 1b) FamilyInstance-панели витража (напр. "Системная панель / Кассета_RAL 5005")
+            List<ElementId> fiPanelIds = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_CurtainWallPanels)
+                .WhereElementIsNotElementType()
+                .OfType<FamilyInstance>()
+                .Select(fi => fi.Id)
+                .ToList();
 
-            if (allPanelIds.Count == 0)
-            {
-                Debug.WriteLine($"{TAG} No curtain panel walls found. Skip.");
-                return;
-            }
+            _logger.Info($"{TAG} Found Wall panels: {wallPanelIds.Count}, FamilyInstance panels: {fiPanelIds.Count}");
 
-            // 2) Отбираем ТОЛЬКО АР панели (вне транзакции), остальные не трогаем
-            List<ElementId> arPanelIds = new List<ElementId>(allPanelIds.Count);
+            // 2) Отбираем ТОЛЬКО АР панели (вне транзакции)
+            List<ElementId> arPanelIds = new List<ElementId>();
             int skippedNotAr = 0;
             int skippedInvalidAtScan = 0;
 
-            foreach (ElementId id in allPanelIds)
+            // 2a) Проход по Wall-панелям
+            foreach (ElementId id in wallPanelIds)
             {
                 Element e = doc.GetElement(id);
-                if (e == null || !e.IsValidObject)
-                {
-                    skippedInvalidAtScan++;
-                    continue;
-                }
+                if (e == null || !e.IsValidObject) { skippedInvalidAtScan++; continue; }
 
                 Wall w = e as Wall;
-                if (w == null)
-                {
-                    skippedInvalidAtScan++;
-                    continue;
-                }
+                if (w == null) { skippedInvalidAtScan++; continue; }
 
                 ElementType t = doc.GetElement(w.GetTypeId()) as ElementType;
-                if (t == null)
-                {
-                    skippedInvalidAtScan++;
-                    continue;
-                }
+                if (t == null) { skippedInvalidAtScan++; continue; }
 
                 string typeName = t.Name ?? string.Empty;
 
                 bool isAr =
                     typeName.StartsWith(AR_TYPE_PREFIX_1, StringComparison.OrdinalIgnoreCase) ||
-                    typeName.StartsWith(AR_TYPE_PREFIX_2, StringComparison.OrdinalIgnoreCase);
+                    typeName.StartsWith(AR_TYPE_PREFIX_2, StringComparison.OrdinalIgnoreCase) ||
+                    typeName.StartsWith(AR_TYPE_PREFIX_3, StringComparison.OrdinalIgnoreCase);
+
+                if (isAr)
+                    arPanelIds.Add(id);
+                else
+                {
+                    skippedNotAr++;
+                    _logger.Info($"{TAG} SKIP Wall (not AR) Id={id.IntegerValue} TypeName='{typeName}'");
+                }
+            }
+
+            // 2b) Проход по FamilyInstance-панелям
+            // Критерий АР для FI: семейство "Системная панель" (загруженное, а не встроенное)
+            const string AR_FI_FAMILY = "Системная панель";
+            foreach (ElementId id in fiPanelIds)
+            {
+                Element e = doc.GetElement(id);
+                if (e == null || !e.IsValidObject) { skippedInvalidAtScan++; continue; }
+
+                FamilyInstance fi = e as FamilyInstance;
+                if (fi == null) { skippedInvalidAtScan++; continue; }
+
+                string famName  = fi.Symbol?.Family?.Name ?? string.Empty;
+                string typeName = fi.Symbol?.Name ?? string.Empty;
+
+                // "Системная панель" + тип "Кассета_*" — АР-панель для замены.
+                // "Системная панель" + тип "Стена" — стекло/рамка, не трогаем.
+                bool isAr = string.Equals(famName, AR_FI_FAMILY, StringComparison.OrdinalIgnoreCase)
+                         && typeName.StartsWith(AR_TYPE_PREFIX_3, StringComparison.OrdinalIgnoreCase);
 
                 if (isAr)
                 {
                     arPanelIds.Add(id);
+                    _logger.Info($"{TAG} AR FamilyInstance Id={id.IntegerValue} Family='{famName}' Type='{typeName}'");
                 }
                 else
                 {
@@ -210,14 +256,12 @@ namespace CWPanelsCustomizer
                 }
             }
 
-            Debug.WriteLine($"{TAG} AR panels found: {arPanelIds.Count}");
-            Debug.WriteLine($"{TAG} Skipped (not AR): {skippedNotAr}");
-            Debug.WriteLine($"{TAG} Skipped (invalid at scan): {skippedInvalidAtScan}");
+            _logger.Info($"{TAG} AR panels total: {arPanelIds.Count} (skippedNotAr={skippedNotAr}, skippedInvalid={skippedInvalidAtScan})");
 
             // Если АР панелей нет — просто выходим (как ты и просил)
             if (arPanelIds.Count == 0)
             {
-                Debug.WriteLine($"{TAG} No AR panels to replace. Skip method.");
+                _logger.Info($"{TAG} No AR panels to replace. Skip method.");
                 return;
             }
 
@@ -260,7 +304,7 @@ namespace CWPanelsCustomizer
                     $"Expected Family='{TARGET_KR_PANEL_FAMILY_NAME}', Type='{TARGET_KR_PANEL_TYPE_NAME}' in OST_CurtainWallPanels.");
             }
 
-            Debug.WriteLine($"{TAG} Target symbol: Family='{targetSymbol.Family.Name}', Type='{targetSymbol.Name}', Id={targetSymbol.Id.IntegerValue}");
+            _logger.Info($"{TAG} Target symbol: Family='{targetSymbol.Family.Name}', Type='{targetSymbol.Name}', Id={targetSymbol.Id.IntegerValue}");
 
             // 4) Активируем символ (безопасно)
             if (!targetSymbol.IsActive)
@@ -294,68 +338,54 @@ namespace CWPanelsCustomizer
                         if (element == null || !element.IsValidObject)
                         {
                             skippedInvalid++;
-                            Debug.WriteLine($"{TAG} SKIP (invalid object). PanelId={panelIdInt}");
+                            _logger.Info($"{TAG} SKIP (invalid object). PanelId={panelIdInt}");
                             continue;
                         }
 
-                        Wall panel = element as Wall;
-                        if (panel == null)
-                        {
-                            skippedInvalid++;
-                            Debug.WriteLine($"{TAG} SKIP (not a Wall anymore). PanelId={panelIdInt}");
-                            continue;
-                        }
-
-                        // Уже нужный КР-тип — не трогаем
-                        if (panel.GetTypeId() == targetTypeId)
+                        // Уже нужный КР-тип — не трогаем (работает для Wall и FamilyInstance)
+                        if (element.GetTypeId() == targetTypeId)
                         {
                             skippedAlreadyKrType++;
                             continue;
                         }
 
-                        bool wasPinned = panel.Pinned;
-                        if (wasPinned)
-                        {
-                            panel.Pinned = false;
-                        }
+                        bool wasPinned = element.Pinned;
+                        if (wasPinned) element.Pinned = false;
 
-                        // ВАЖНО: после ChangeTypeId объект может стать невалидным
-                        panel.ChangeTypeId(targetTypeId);
+                        // ChangeTypeId работает и для Wall, и для FamilyInstance панелей витража
+                        element.ChangeTypeId(targetTypeId);
 
                         // Возвращаем pinned через повторное получение элемента по Id
                         if (wasPinned)
                         {
                             Element after = doc.GetElement(panelId);
-                            if (after != null && after.IsValidObject)
-                            {
-                                after.Pinned = true;
-                            }
+                            if (after != null && after.IsValidObject) after.Pinned = true;
                         }
 
                         replaced++;
-                        Debug.WriteLine($"{TAG} REPLACED (AR->KR). PanelId={panelIdInt} -> Family='{TARGET_KR_PANEL_FAMILY_NAME}', Type='{TARGET_KR_PANEL_TYPE_NAME}'");
+                        _logger.Info($"{TAG} REPLACED (AR->KR). PanelId={panelIdInt} -> Family='{TARGET_KR_PANEL_FAMILY_NAME}', Type='{TARGET_KR_PANEL_TYPE_NAME}'");
                     }
                     catch (Autodesk.Revit.Exceptions.InvalidObjectException)
                     {
                         skippedInvalid++;
-                        Debug.WriteLine($"{TAG} SKIP (InvalidObjectException). PanelId={panelIdInt}");
+                        _logger.Info($"{TAG} SKIP (InvalidObjectException). PanelId={panelIdInt}");
                     }
                     catch (Exception ex)
                     {
                         failed++;
-                        Debug.WriteLine($"{TAG} FAILED. PanelId={panelIdInt}. Error: {ex.Message}");
+                        _logger.Info($"{TAG} FAILED. PanelId={panelIdInt}. Error: {ex.Message}");
                     }
                 }
 
                 tx.Commit();
             }
 
-            Debug.WriteLine($"{TAG} SUMMARY:");
-            Debug.WriteLine($"{TAG}  AR panels processed: {arPanelIds.Count}");
-            Debug.WriteLine($"{TAG}  Replaced (AR->KR): {replaced}");
-            Debug.WriteLine($"{TAG}  Skipped (already KR type): {skippedAlreadyKrType}");
-            Debug.WriteLine($"{TAG}  Skipped (invalid): {skippedInvalid}");
-            Debug.WriteLine($"{TAG}  Failed: {failed}");
+            _logger.Info($"{TAG} SUMMARY:");
+            _logger.Info($"{TAG}  AR panels processed: {arPanelIds.Count}");
+            _logger.Info($"{TAG}  Replaced (AR->KR): {replaced}");
+            _logger.Info($"{TAG}  Skipped (already KR type): {skippedAlreadyKrType}");
+            _logger.Info($"{TAG}  Skipped (invalid): {skippedInvalid}");
+            _logger.Info($"{TAG}  Failed: {failed}");
         }
 
 
@@ -380,11 +410,11 @@ namespace CWPanelsCustomizer
             double sideTolFt = MmToFt(SIDE_TOL_MM);
             double bandExpandFt = MmToFt(BAND_EXPAND_MM);
 
-            Debug.WriteLine($"{TAG} START");
+            _logger.Info($"{TAG} START");
 
             if (data == null || data.Count == 0)
             {
-                Debug.WriteLine($"{TAG} data is null/empty -> END");
+                _logger.Info($"{TAG} data is null/empty -> END");
                 return;
             }
 
@@ -485,7 +515,7 @@ namespace CWPanelsCustomizer
                     var openings = cw.IntersectingOpenings ?? new List<OpeningModelDto>();
                     var panels = cw.Panels ?? new List<CurtainWallPanelDto>();
 
-                    Debug.WriteLine($"{TAG} wallId={wallId} openings={openings.Count} panels={panels.Count}");
+                    _logger.Info($"{TAG} wallId={wallId} openings={openings.Count} panels={panels.Count}");
 
                     if (openings.Count == 0 || panels.Count == 0)
                         continue;
@@ -498,7 +528,7 @@ namespace CWPanelsCustomizer
                         var obLocalFresh = GetLocalBBoxFresh(opening.OpeningElement, cw.InverseTransform);
                         if (obLocalFresh == null)
                         {
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opening.Id.IntegerValue} obLocal=null -> skip");
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opening.Id.IntegerValue} obLocal=null -> skip");
                             continue;
                         }
 
@@ -508,7 +538,7 @@ namespace CWPanelsCustomizer
                         var obLocal = ExpandXZ(obLocalFresh, bandExpandFt);
                         var wCenterX = CenterOf(obLocalFresh).X;
 
-                        Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} windowCenterX(local)={wCenterX:F4}");
+                        _logger.Info($"{TAG} wallId={wallId} openingId={opId} windowCenterX(local)={wCenterX:F4}");
 
                         foreach (var pdto in panels)
                         {
@@ -597,7 +627,7 @@ namespace CWPanelsCustomizer
                                 if (!flipped)
                                 {
                                     skippedNoFlip++;
-                                    Debug.WriteLine($"{TAG} panelId={fi.Id.IntegerValue} cannot flip -> skip");
+                                    _logger.Info($"{TAG} panelId={fi.Id.IntegerValue} cannot flip -> skip");
                                     SetCommentSafe(fi, debug + " | RESULT=CANNOT_FLIP");
                                     continue;
                                 }
@@ -620,7 +650,7 @@ namespace CWPanelsCustomizer
                             catch (Exception ex)
                             {
                                 flipErrors++;
-                                Debug.WriteLine($"{TAG} ERROR flip wallId={wallId} openingId={opId} panelId={fi.Id.IntegerValue}: {ex}");
+                                _logger.Info($"{TAG} ERROR flip wallId={wallId} openingId={opId} panelId={fi.Id.IntegerValue}: {ex}");
                                 SetCommentSafe(fi, debug + " | RESULT=ERROR");
                                 // processedPanels.Add(fi.Id) уже стоит — чтобы не зациклиться на падающей панели
                             }
@@ -632,14 +662,14 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Debug.WriteLine($"{TAG} END wallsProcessed={wallsProcessed} openingsProcessed={openingsProcessed}");
-            Debug.WriteLine($"{TAG} panelsSeen={panelsSeen}");
-            Debug.WriteLine($"{TAG} bbIntersectTypeMatched={bbIntersectTypeMatched}");
-            Debug.WriteLine($"{TAG} needMirrorCandidates={needMirrorCandidates}");
-            Debug.WriteLine($"{TAG} flippedOk={flippedOk}");
-            Debug.WriteLine($"{TAG} skippedAlreadyProcessed={skippedAlreadyProcessed}");
-            Debug.WriteLine($"{TAG} skippedNoFlip={skippedNoFlip}");
-            Debug.WriteLine($"{TAG} flipErrors={flipErrors}");
+            _logger.Info($"{TAG} END wallsProcessed={wallsProcessed} openingsProcessed={openingsProcessed}");
+            _logger.Info($"{TAG} panelsSeen={panelsSeen}");
+            _logger.Info($"{TAG} bbIntersectTypeMatched={bbIntersectTypeMatched}");
+            _logger.Info($"{TAG} needMirrorCandidates={needMirrorCandidates}");
+            _logger.Info($"{TAG} flippedOk={flippedOk}");
+            _logger.Info($"{TAG} skippedAlreadyProcessed={skippedAlreadyProcessed}");
+            _logger.Info($"{TAG} skippedNoFlip={skippedNoFlip}");
+            _logger.Info($"{TAG} flipErrors={flipErrors}");
         }
 
         private void CalculateAndSetCutoutPanelsCuts(List<CurtainWallDataDto> data)
@@ -660,11 +690,11 @@ namespace CWPanelsCustomizer
 
             double MmToFt(double mm) => mm / FEET_TO_MM;
 
-            Debug.WriteLine($"{TAG} START");
+            _logger.Info($"{TAG} START");
 
             if (data == null || data.Count == 0)
             {
-                Debug.WriteLine($"{TAG} data is null/empty -> END");
+                _logger.Info($"{TAG} data is null/empty -> END");
                 return;
             }
 
@@ -754,7 +784,7 @@ namespace CWPanelsCustomizer
                     var openings = cw.IntersectingOpenings ?? new List<OpeningModelDto>();
                     var panelsAll = cw.Panels ?? new List<CurtainWallPanelDto>();
 
-                    Debug.WriteLine($"{TAG} wallId={wallId} openings={openings.Count} panels={panelsAll.Count}");
+                    _logger.Info($"{TAG} wallId={wallId} openings={openings.Count} panels={panelsAll.Count}");
 
                     if (openings.Count == 0 || panelsAll.Count == 0)
                         continue;
@@ -770,7 +800,7 @@ namespace CWPanelsCustomizer
                         })
                         .ToList();
 
-                    Debug.WriteLine($"{TAG} wallId={wallId} cutoutPanels={cutoutPanels.Count}");
+                    _logger.Info($"{TAG} wallId={wallId} cutoutPanels={cutoutPanels.Count}");
                     if (cutoutPanels.Count == 0)
                         continue;
 
@@ -782,7 +812,7 @@ namespace CWPanelsCustomizer
                         var opBox = GetLocalBBoxFresh(op.OpeningElement, cw.InverseTransform);
                         if (opBox == null)
                         {
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={op.Id.IntegerValue} opBox=null -> skip");
+                            _logger.Info($"{TAG} wallId={wallId} openingId={op.Id.IntegerValue} opBox=null -> skip");
                             continue;
                         }
 
@@ -803,11 +833,11 @@ namespace CWPanelsCustomizer
 
                         cutoutsIntersectingTotal += intersectingCutouts.Count;
 
-                        Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} intersectingCutouts={intersectingCutouts.Count}");
+                        _logger.Info($"{TAG} wallId={wallId} openingId={opId} intersectingCutouts={intersectingCutouts.Count}");
 
                         if (intersectingCutouts.Count == 0)
                         {
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} -> no intersecting cutouts, skip");
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} -> no intersecting cutouts, skip");
                             continue;
                         }
 
@@ -848,7 +878,7 @@ namespace CWPanelsCustomizer
                             (tl != null ? 1 : 0) + (tr != null ? 1 : 0) + (bl != null ? 1 : 0) + (br != null ? 1 : 0);
                         cornersDetectedTotal += cornersDetected;
 
-                        Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} cornersDetected={cornersDetected} " +
+                        _logger.Info($"{TAG} wallId={wallId} openingId={opId} cornersDetected={cornersDetected} " +
                                         $"TL={(tl?.Id.IntegerValue.ToString() ?? "null")} " +
                                         $"TR={(tr?.Id.IntegerValue.ToString() ?? "null")} " +
                                         $"BL={(bl?.Id.IntegerValue.ToString() ?? "null")} " +
@@ -866,28 +896,28 @@ namespace CWPanelsCustomizer
                         {
                             var bb = GetLocalBBoxFresh(tl, cw.InverseTransform);
                             TLok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out tlW, out tlH);
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} TL panelId={tl.Id.IntegerValue} fam='{tl.Symbol?.Family?.Name}' " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL panelId={tl.Id.IntegerValue} fam='{tl.Symbol?.Family?.Name}' " +
                                             $"intersectOk={TLok} baseW={tlW * FEET_TO_MM:F1}mm baseH={tlH * FEET_TO_MM:F1}mm");
                         }
                         if (tr != null)
                         {
                             var bb = GetLocalBBoxFresh(tr, cw.InverseTransform);
                             TRok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out trW, out trH);
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} TR panelId={tr.Id.IntegerValue} fam='{tr.Symbol?.Family?.Name}' " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR panelId={tr.Id.IntegerValue} fam='{tr.Symbol?.Family?.Name}' " +
                                             $"intersectOk={TRok} baseW={trW * FEET_TO_MM:F1}mm baseH={trH * FEET_TO_MM:F1}mm");
                         }
                         if (bl != null)
                         {
                             var bb = GetLocalBBoxFresh(bl, cw.InverseTransform);
                             BLok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out blW, out blH);
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} BL panelId={bl.Id.IntegerValue} fam='{bl.Symbol?.Family?.Name}' " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL panelId={bl.Id.IntegerValue} fam='{bl.Symbol?.Family?.Name}' " +
                                             $"intersectOk={BLok} baseW={blW * FEET_TO_MM:F1}mm baseH={blH * FEET_TO_MM:F1}mm");
                         }
                         if (br != null)
                         {
                             var bb = GetLocalBBoxFresh(br, cw.InverseTransform);
                             BRok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out brW, out brH);
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} BR panelId={br.Id.IntegerValue} fam='{br.Symbol?.Family?.Name}' " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR panelId={br.Id.IntegerValue} fam='{br.Symbol?.Family?.Name}' " +
                                             $"intersectOk={BRok} baseW={brW * FEET_TO_MM:F1}mm baseH={brH * FEET_TO_MM:F1}mm");
                         }
 
@@ -895,7 +925,7 @@ namespace CWPanelsCustomizer
                         double leftWidth = CombineSideWidth(tlW, blW);
                         double rightWidth = CombineSideWidth(trW, brW);
 
-                        Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} sideBaseWidths: " +
+                        _logger.Info($"{TAG} wallId={wallId} openingId={opId} sideBaseWidths: " +
                                         $"leftWidth={leftWidth * FEET_TO_MM:F1}mm rightWidth={rightWidth * FEET_TO_MM:F1}mm");
 
                         // Запись с учётом констант по семействам
@@ -906,7 +936,7 @@ namespace CWPanelsCustomizer
                             string famName = fi.Symbol?.Family?.Name ?? "";
 
                             // --- ПОКАЗЫВАЕМ В ЛОГЕ: ЧТО МЫ СОБИРАЕМСЯ ЗАПИСЫВАТЬ ---
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} {cornerName} panelId={fi.Id.IntegerValue} fam='{famName}' " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} {cornerName} panelId={fi.Id.IntegerValue} fam='{famName}' " +
                                             $"baseW={baseWidthFt * FEET_TO_MM:F1}mm baseH={baseHeightFt * FEET_TO_MM:F1}mm");
 
                             double adjustedW = baseWidthFt;
@@ -924,7 +954,7 @@ namespace CWPanelsCustomizer
                                 adjustedH = baseHeightFt - MmToFt(G_VERTICAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
                                 adjustedW = baseWidthFt - MmToFt(G_HORIZONTAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
 
-                                Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY G: " +
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY G: " +
                                                 $"H = baseH - {G_VERTICAL_MM}mm, W = baseW - ({G_HORIZONTAL_MM}mm)");
                             }
                             else if (famName == CUTOUT_L_FAMILY)
@@ -932,34 +962,34 @@ namespace CWPanelsCustomizer
                                 adjustedH = baseHeightFt - MmToFt(L_VERTICAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
                                 adjustedW = baseWidthFt - MmToFt(L_HORIZONTAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
 
-                                Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY L: " +
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY L: " +
                                                 $"H = baseH - {L_VERTICAL_MM}mm, W = baseW + ({L_HORIZONTAL_MM}mm)");
                             }
                             else
                             {
                                 // На всякий: если сюда попало что-то другое — пишем без поправок
-                                Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} unknown family -> no offsets");
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} unknown family -> no offsets");
                             }
 
-                            Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} {cornerName} panelId={fi.Id.IntegerValue} " +
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} {cornerName} panelId={fi.Id.IntegerValue} " +
                                             $"finalW={adjustedW * FEET_TO_MM:F1}mm finalH={adjustedH * FEET_TO_MM:F1}mm");
 
                             // Защита от отрицательных/нулевых (как у вас: if <= EPS continue)
                             if (baseWidthFt <= EPS || baseHeightFt <= EPS)
                             {
-                                Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} baseW/baseH <= 0 -> skip write");
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} baseW/baseH <= 0 -> skip write");
                                 return;
                             }
                             if (adjustedW <= EPS || adjustedH <= EPS)
                             {
-                                Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} finalW/finalH <= 0 -> skip write");
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} finalW/finalH <= 0 -> skip write");
                                 return;
                             }
 
                             bool setW = TrySetParam(fi, CUT_PARAM_W, adjustedW);
                             bool setH = TrySetParam(fi, CUT_PARAM_H, adjustedH);
 
-                            Debug.WriteLine($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} WRITE " +
+                            _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} WRITE " +
                                             $"{CUT_PARAM_W} ok={setW}, {CUT_PARAM_H} ok={setH}");
 
                             if (setW) paramsSet++;
@@ -969,16 +999,16 @@ namespace CWPanelsCustomizer
 
                         // По стороне: ширина общая (left/right), высота индивидуальная по углу
                         if (TLok) SetCutout(tl, "TL", leftWidth, tlH);
-                        else if (tl != null) Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} TL exists but intersection invalid -> skip");
+                        else if (tl != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL exists but intersection invalid -> skip");
 
                         if (BLok) SetCutout(bl, "BL", leftWidth, blH);
-                        else if (bl != null) Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} BL exists but intersection invalid -> skip");
+                        else if (bl != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL exists but intersection invalid -> skip");
 
                         if (TRok) SetCutout(tr, "TR", rightWidth, trH);
-                        else if (tr != null) Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} TR exists but intersection invalid -> skip");
+                        else if (tr != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR exists but intersection invalid -> skip");
 
                         if (BRok) SetCutout(br, "BR", rightWidth, brH);
-                        else if (br != null) Debug.WriteLine($"{TAG} wallId={wallId} openingId={opId} BR exists but intersection invalid -> skip");
+                        else if (br != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR exists but intersection invalid -> skip");
                     }
                 }
 
@@ -986,7 +1016,7 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Debug.WriteLine($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, " +
+            _logger.Info($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, " +
                             $"cutoutsIntersectingTotal={cutoutsIntersectingTotal}, cornersDetectedTotal={cornersDetectedTotal}, " +
                             $"cutoutPanelsUpdated={cutoutPanelsUpdated}, paramsSet={paramsSet}");
         }
@@ -1010,11 +1040,11 @@ namespace CWPanelsCustomizer
         //    const double CHECK_SEGMENT_LENGTH_FT = 0.328084;
         //    const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;
 
-        //    Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] START");
+        //    _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] START");
 
         //    if (data == null || data.Count == 0)
         //    {
-        //        Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
+        //        _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
         //        return;
         //    }
 
@@ -1126,7 +1156,7 @@ namespace CWPanelsCustomizer
 
         //    if (topSymbol == null || bottomSymbol == null)
         //    {
-        //        Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found. Top null={topSymbol == null}, Bottom null={bottomSymbol == null}");
+        //        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found. Top null={topSymbol == null}, Bottom null={bottomSymbol == null}");
         //        TaskDialog.Show("Ошибка", "Не найдены семейства для замены угловых панелей (проверь имена семейств в проекте).");
         //        return;
         //    }
@@ -1247,7 +1277,7 @@ namespace CWPanelsCustomizer
         //                    }
         //                    catch (Exception ex)
         //                    {
-        //                        Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
+        //                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
         //                    }
         //                }
         //            }
@@ -1256,7 +1286,7 @@ namespace CWPanelsCustomizer
         //        t.Commit();
         //    }
 
-        //    Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
+        //    _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
         //}
 
 
@@ -1274,11 +1304,11 @@ namespace CWPanelsCustomizer
             const double CHECK_SEGMENT_LENGTH_FT = 0.328084;
             const double PANEL_BBOX_REDUCTION_FACTOR = 0.70;
 
-            Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] START");
+            _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] START");
 
             if (data == null || data.Count == 0)
             {
-                Debug.WriteLine("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
+                _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
                 return;
             }
 
@@ -1418,9 +1448,9 @@ namespace CWPanelsCustomizer
 
             if (topSymbol == null || bottomSymbol == null)
             {
-                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found.");
-                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] Top: Family='{CUTOUT_TOP_FAMILY}', Type='{CUTOUT_TOP_FAMILY_TYPE}', null={topSymbol == null}");
-                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] Bottom: Family='{CUTOUT_BOTTOM_FAMILY}', Type='{CUTOUT_BOTTOM_TYPE}', null={bottomSymbol == null}");
+                _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] ERROR: target symbols not found.");
+                _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] Top: Family='{CUTOUT_TOP_FAMILY}', Type='{CUTOUT_TOP_FAMILY_TYPE}', null={topSymbol == null}");
+                _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] Bottom: Family='{CUTOUT_BOTTOM_FAMILY}', Type='{CUTOUT_BOTTOM_TYPE}', null={bottomSymbol == null}");
 
                 TaskDialog.Show("Ошибка",
                     "Не найдены типы (FamilySymbol) для замены угловых панелей.\n" +
@@ -1546,7 +1576,7 @@ namespace CWPanelsCustomizer
                             }
                             catch (Exception ex)
                             {
-                                Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
+                                _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] panelId={panelFi.Id.IntegerValue} replace ERROR: {ex.Message}");
                             }
                         }
                     }
@@ -1555,18 +1585,18 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Debug.WriteLine($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
+            _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
         }
 
         private void ResetRegularPanelsCutsForIntersectingOpenings(List<CurtainWallDataDto> data)
         {
             const string TAG = "[ResetRegularPanelsCutsForIntersectingOpenings]";
             const string REGULAR_PANEL_FAMILY = REGULAR_PANEL_FAMILY_NAME;
-            Debug.WriteLine($"{TAG} START");
+            _logger.Info($"{TAG} START");
 
             if (data == null || data.Count == 0)
             {
-                Debug.WriteLine($"{TAG} data is null/empty -> END");
+                _logger.Info($"{TAG} data is null/empty -> END");
                 return;
             }
 
@@ -1643,11 +1673,11 @@ namespace CWPanelsCustomizer
                     t.Commit();
                 }
 
-                Debug.WriteLine($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, panelsTouched={panelsTouched}, paramsSet={paramsSet}");
+                _logger.Info($"{TAG} END: wallsProcessed={wallsProcessed}, openingsProcessed={openingsProcessed}, panelsTouched={panelsTouched}, paramsSet={paramsSet}");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"{TAG} ERROR: {ex}");
+                _logger.Info($"{TAG} ERROR: {ex}");
                 TaskDialog.Show("ResetRegularPanelsCutsForIntersectingOpenings", ex.Message);
             }
 
@@ -1670,10 +1700,10 @@ namespace CWPanelsCustomizer
 
         private void CalculateAndSetRegularPanelsCuts(List<CurtainWallDataDto> data)
         {
-            Debug.WriteLine("[CalculateAndSetRegularPanelsCuts] START");
+            _logger.Info("[CalculateAndSetRegularPanelsCuts] START");
             if (data == null || data.Count == 0)
             {
-                Debug.WriteLine("[CalculateAndSetRegularPanelsCuts] data is null/empty -> END");
+                _logger.Info("[CalculateAndSetRegularPanelsCuts] data is null/empty -> END");
                 return;
             }
 
@@ -1796,13 +1826,13 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            Debug.WriteLine($"[CalculateAndSetRegularPanelsCuts] END: openingsProcessed={totalOpeningsProcessed}, panelsTouched={totalPanelsTouched}, paramsSet={totalParamsSet}");
+            _logger.Info($"[CalculateAndSetRegularPanelsCuts] END: openingsProcessed={totalOpeningsProcessed}, panelsTouched={totalPanelsTouched}, paramsSet={totalParamsSet}");
         }
 
 
         private List<CurtainWallDataDto> GetElements(Document doc)
         {
-            Debug.WriteLine("[CWPanelsCustomizer] GetElements START");
+            _logger.Info("[CWPanelsCustomizer] GetElements START");
 
             List<Wall> allCurtainWalls = new FilteredElementCollector(doc)
                 .OfClass(typeof(Wall))
@@ -1810,7 +1840,7 @@ namespace CWPanelsCustomizer
                 .Where(w => w != null && w.CurtainGrid != null)
                 .ToList();
 
-            Debug.WriteLine($"[CWPanelsCustomizer] allCurtainWalls={allCurtainWalls.Count}");
+            _logger.Info($"[CWPanelsCustomizer] allCurtainWalls={allCurtainWalls.Count}");
 
             List<FamilyInstance> allOpenings = new FilteredElementCollector(doc)
                 .OfCategory(BuiltInCategory.OST_GenericModel)
@@ -1823,7 +1853,7 @@ namespace CWPanelsCustomizer
                     fi.Symbol.Family.Name.Contains("#_Оконный проем_Прямоугольный"))
                 .ToList();
 
-            Debug.WriteLine($"[CWPanelsCustomizer] allOpenings={allOpenings.Count}");
+            _logger.Info($"[CWPanelsCustomizer] allOpenings={allOpenings.Count}");
 
             List<CurtainWallDataDto> curtainWallsData = new List<CurtainWallDataDto>();
             Dictionary<ElementId, BoundingBoxXYZ> wallBboxesWorld = new Dictionary<ElementId, BoundingBoxXYZ>();
@@ -1845,7 +1875,7 @@ namespace CWPanelsCustomizer
                 curtainWallsData.Add(cwDto);
                 wallBboxesWorld[wall.Id] = wallBboxWorld;
 
-                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={wall.Id.IntegerValue} bboxWorld={(wallBboxWorld == null ? "null" : "ok")}");
+                _logger.Info($"[CWPanelsCustomizer] wall Id={wall.Id.IntegerValue} bboxWorld={(wallBboxWorld == null ? "null" : "ok")}");
             }
 
             foreach (FamilyInstance opening in allOpenings)
@@ -1853,7 +1883,7 @@ namespace CWPanelsCustomizer
                 BoundingBoxXYZ openingBboxWorld = opening.get_BoundingBox(null);
                 if (openingBboxWorld == null)
                 {
-                    Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} bboxWorld=null skip");
+                    _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} bboxWorld=null skip");
                     continue;
                 }
 
@@ -1873,7 +1903,7 @@ namespace CWPanelsCustomizer
 
                 if (host == null)
                 {
-                    Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} intersects no wall");
+                    _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} intersects no wall");
                     continue;
                 }
 
@@ -1887,7 +1917,7 @@ namespace CWPanelsCustomizer
                     LocalBoundingBox = openingLocal
                 });
 
-                Debug.WriteLine($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} assigned to wall Id={host.Id.IntegerValue}");
+                _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} assigned to wall Id={host.Id.IntegerValue}");
             }
 
             foreach (CurtainWallDataDto cw in curtainWallsData)
@@ -1896,7 +1926,7 @@ namespace CWPanelsCustomizer
                 if (grid == null) continue;
 
                 ICollection<ElementId> panelIds = grid.GetPanelIds();
-                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelIds={panelIds.Count}");
+                _logger.Info($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelIds={panelIds.Count}");
 
                 foreach (ElementId pid in panelIds)
                 {
@@ -1907,7 +1937,7 @@ namespace CWPanelsCustomizer
                     BoundingBoxXYZ panelWorld = panelFi.get_BoundingBox(null);
                     if (panelWorld == null)
                     {
-                        Debug.WriteLine($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} bboxWorld=null skip");
+                        _logger.Info($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} bboxWorld=null skip");
                         continue;
                     }
 
@@ -1923,13 +1953,13 @@ namespace CWPanelsCustomizer
                     });
                 }
 
-                Debug.WriteLine($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelsFilled={cw.Panels.Count}");
+                _logger.Info($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelsFilled={cw.Panels.Count}");
             }
 
             List<CurtainWallDataDto> wallsInWork = curtainWallsData.Where(x => x.IntersectingOpenings.Any()).ToList();
-            Debug.WriteLine($"[CWPanelsCustomizer] wallsInWork={wallsInWork.Count}");
+            _logger.Info($"[CWPanelsCustomizer] wallsInWork={wallsInWork.Count}");
 
-            Debug.WriteLine("[CWPanelsCustomizer] GetElements END");
+            _logger.Info("[CWPanelsCustomizer] GetElements END");
             return wallsInWork;
         }
 
@@ -1994,7 +2024,7 @@ namespace CWPanelsCustomizer
                 transf.Origin = ptStart;
             }
 
-            Debug.WriteLine($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} Origin=({transf.Origin.X:F3},{transf.Origin.Y:F3},{transf.Origin.Z:F3})");
+            _logger.Info($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} Origin=({transf.Origin.X:F3},{transf.Origin.Y:F3},{transf.Origin.Z:F3})");
             return transf;
         }
 
@@ -2140,6 +2170,92 @@ namespace CWPanelsCustomizer
         {
             if (e == null) return null;
             return e.get_BoundingBox(null);
+        }
+
+        // === CONVERT PANELS INSIDE OPENINGS TO EMPTY PANELS ===
+
+        private void ConvertPanelsInsideOpeningsToEmpty(List<CurtainWallDataDto> data)
+        {
+            const string TAG = "[ConvertPanelsInsideOpeningsToEmpty]";
+
+            ElementId emptyTypeId = FindEmptyPanelTypeId(_doc);
+            if (emptyTypeId == null)
+            {
+                _logger.Warn($"{TAG} Empty panel type not found.");
+                LogAvailableCurtainPanelTypes();
+                return;
+            }
+
+            bool CenterInside(BoundingBoxXYZ p, BoundingBoxXYZ o)
+            {
+                double cx = (p.Min.X + p.Max.X) * 0.5, cz = (p.Min.Z + p.Max.Z) * 0.5;
+                return cx >= o.Min.X && cx <= o.Max.X && cz >= o.Min.Z && cz <= o.Max.Z;
+            }
+
+            int converted = 0, skipped = 0, errors = 0;
+            using (Transaction tx = new Transaction(_doc, "Convert panels inside openings to empty"))
+            {
+                tx.Start();
+                foreach (CurtainWallDataDto cw in data)
+                foreach (OpeningModelDto opening in cw.IntersectingOpenings)
+                {
+                    if (opening.LocalBoundingBox == null) continue;
+                    foreach (CurtainWallPanelDto panel in cw.Panels)
+                    {
+                        if (panel.LocalBoundingBox == null || !CenterInside(panel.LocalBoundingBox, opening.LocalBoundingBox)) continue;
+                        Element elem = _doc.GetElement(panel.Id);
+                        if (elem == null || !elem.IsValidObject || elem.GetTypeId() == emptyTypeId) { skipped++; continue; }
+                        try
+                        {
+                            bool wasPinned = elem.Pinned;
+                            if (wasPinned) elem.Pinned = false;
+                            elem.ChangeTypeId(emptyTypeId);
+                            if (wasPinned) { Element a = _doc.GetElement(panel.Id); if (a?.IsValidObject == true) a.Pinned = true; }
+                            converted++;
+                            _logger.Info($"{TAG} CONVERTED panelId={panel.Id.IntegerValue} openingId={opening.Id.IntegerValue} wallId={cw.Id.IntegerValue}");
+                        }
+                        catch (Exception ex) { errors++; _logger.Warn($"{TAG} FAILED panelId={panel.Id.IntegerValue}: {ex.Message}"); }
+                    }
+                }
+                tx.Commit();
+            }
+            _logger.LogSummary(TAG, ("converted", converted), ("skipped", skipped), ("errors", errors));
+        }
+
+        private ElementId FindEmptyPanelTypeId(Document doc)
+        {
+            var sym = new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()
+                .FirstOrDefault(fs => fs.Category?.Id?.IntegerValue == (int)BuiltInCategory.OST_CurtainWallPanels
+                                   && fs.FamilyName.IndexOf("Пустая", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (sym != null)
+            {
+                _logger.Info($"[FindEmptyPanelTypeId] FamilySymbol: Family='{sym.FamilyName}' Type='{sym.Name}' Id={sym.Id.IntegerValue}");
+                return sym.Id;
+            }
+
+            var wt = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>()
+                .FirstOrDefault(w => w.Kind == WallKind.Curtain
+                                  && new[] { "Пустая", "Пусто", "Empty" }.Any(s => w.Name.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0));
+            if (wt != null)
+            {
+                _logger.Info($"[FindEmptyPanelTypeId] WallType: Name='{wt.Name}' Id={wt.Id.IntegerValue}");
+                return wt.Id;
+            }
+
+            return null;
+        }
+
+        private void LogAvailableCurtainPanelTypes()
+        {
+            _logger.Info("[LogAvailableCurtainPanelTypes] FamilySymbols:");
+            new FilteredElementCollector(_doc).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()
+                .Where(fs => fs.Category?.Id?.IntegerValue == (int)BuiltInCategory.OST_CurtainWallPanels)
+                .ToList().ForEach(s => _logger.Info($"  Id={s.Id.IntegerValue} Family='{s.FamilyName}' Type='{s.Name}'"));
+
+            _logger.Info("[LogAvailableCurtainPanelTypes] WallTypes (Curtain):");
+            new FilteredElementCollector(_doc).OfClass(typeof(WallType)).Cast<WallType>()
+                .Where(wt => wt.Kind == WallKind.Curtain)
+                .ToList().ForEach(wt => _logger.Info($"  Id={wt.Id.IntegerValue} Name='{wt.Name}'"));
         }
     }
 }
