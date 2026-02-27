@@ -220,10 +220,7 @@ namespace CWPanelsCustomizer
                 if (isAr)
                     arPanelIds.Add(id);
                 else
-                {
                     skippedNotAr++;
-                    _logger.Info($"{TAG} SKIP Wall (not AR) Id={id.IntegerValue} TypeName='{typeName}'");
-                }
             }
 
             // 2b) Проход по FamilyInstance-панелям
@@ -627,7 +624,6 @@ namespace CWPanelsCustomizer
                                 if (!flipped)
                                 {
                                     skippedNoFlip++;
-                                    _logger.Info($"{TAG} panelId={fi.Id.IntegerValue} cannot flip -> skip");
                                     SetCommentSafe(fi, debug + " | RESULT=CANNOT_FLIP");
                                     continue;
                                 }
@@ -1860,106 +1856,66 @@ namespace CWPanelsCustomizer
 
             foreach (Wall wall in allCurtainWalls)
             {
-                BoundingBoxXYZ wallBboxWorld = wall.get_BoundingBox(null);
-
                 Transform wallTransform = GetWallTransform(wall);
-                Transform inverseTransform = wallTransform.Inverse;
-
-                CurtainWallDataDto cwDto = new CurtainWallDataDto
+                curtainWallsData.Add(new CurtainWallDataDto
                 {
                     Id = wall.Id,
                     CurtainWallElement = wall,
-                    InverseTransform = inverseTransform
-                };
-
-                curtainWallsData.Add(cwDto);
-                wallBboxesWorld[wall.Id] = wallBboxWorld;
-
-                _logger.Info($"[CWPanelsCustomizer] wall Id={wall.Id.IntegerValue} bboxWorld={(wallBboxWorld == null ? "null" : "ok")}");
+                    InverseTransform = wallTransform.Inverse
+                });
+                wallBboxesWorld[wall.Id] = wall.get_BoundingBox(null);
             }
 
             foreach (FamilyInstance opening in allOpenings)
             {
                 BoundingBoxXYZ openingBboxWorld = opening.get_BoundingBox(null);
-                if (openingBboxWorld == null)
-                {
-                    _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} bboxWorld=null skip");
-                    continue;
-                }
+                if (openingBboxWorld == null) continue;
 
                 CurtainWallDataDto host = null;
-
                 foreach (CurtainWallDataDto cw in curtainWallsData)
                 {
-                    if (!wallBboxesWorld.TryGetValue(cw.Id, out BoundingBoxXYZ wallBboxWorld) || wallBboxWorld == null)
-                        continue;
-
-                    if (BoundingBoxesIntersect(wallBboxWorld, openingBboxWorld))
-                    {
-                        host = cw;
-                        break;
-                    }
+                    if (wallBboxesWorld.TryGetValue(cw.Id, out BoundingBoxXYZ wb) && wb != null && BoundingBoxesIntersect(wb, openingBboxWorld))
+                    { host = cw; break; }
                 }
-
-                if (host == null)
-                {
-                    _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} intersects no wall");
-                    continue;
-                }
-
-                BoundingBoxXYZ openingLocal = TransformBoundingBoxToLocal(openingBboxWorld, host.InverseTransform);
+                if (host == null) continue;
 
                 host.IntersectingOpenings.Add(new OpeningModelDto
                 {
                     Id = opening.Id,
                     OpeningElement = opening,
                     WorldBoundingBox = openingBboxWorld,
-                    LocalBoundingBox = openingLocal
+                    LocalBoundingBox = TransformBoundingBoxToLocal(openingBboxWorld, host.InverseTransform)
                 });
-
-                _logger.Info($"[CWPanelsCustomizer] opening Id={opening.Id.IntegerValue} assigned to wall Id={host.Id.IntegerValue}");
             }
 
-            foreach (CurtainWallDataDto cw in curtainWallsData)
+            // Собираем панели только для стен с проёмами (остальные не нужны)
+            List<CurtainWallDataDto> wallsInWork = curtainWallsData.Where(x => x.IntersectingOpenings.Any()).ToList();
+
+            foreach (CurtainWallDataDto cw in wallsInWork)
             {
                 CurtainGrid grid = cw.CurtainWallElement.CurtainGrid;
                 if (grid == null) continue;
 
-                ICollection<ElementId> panelIds = grid.GetPanelIds();
-                _logger.Info($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelIds={panelIds.Count}");
-
-                foreach (ElementId pid in panelIds)
+                foreach (ElementId pid in grid.GetPanelIds())
                 {
                     FamilyInstance panelFi = doc.GetElement(pid) as FamilyInstance;
-                    if (panelFi == null)
-                        continue;
+                    if (panelFi == null) continue;
 
                     BoundingBoxXYZ panelWorld = panelFi.get_BoundingBox(null);
-                    if (panelWorld == null)
-                    {
-                        _logger.Info($"[CWPanelsCustomizer] panel Id={pid.IntegerValue} bboxWorld=null skip");
-                        continue;
-                    }
-
-                    BoundingBoxXYZ panelLocal = TransformBoundingBoxToLocal(panelWorld, cw.InverseTransform);
+                    if (panelWorld == null) continue;
 
                     cw.Panels.Add(new CurtainWallPanelDto
                     {
                         Id = panelFi.Id,
                         PanelElement = panelFi,
                         WorldBoundingBox = panelWorld,
-                        LocalBoundingBox = panelLocal,
+                        LocalBoundingBox = TransformBoundingBoxToLocal(panelWorld, cw.InverseTransform),
                         IsMirrored = false
                     });
                 }
-
-                _logger.Info($"[CWPanelsCustomizer] wall Id={cw.Id.IntegerValue} panelsFilled={cw.Panels.Count}");
             }
 
-            List<CurtainWallDataDto> wallsInWork = curtainWallsData.Where(x => x.IntersectingOpenings.Any()).ToList();
-            _logger.Info($"[CWPanelsCustomizer] wallsInWork={wallsInWork.Count}");
-
-            _logger.Info("[CWPanelsCustomizer] GetElements END");
+            _logger.Info($"[CWPanelsCustomizer] GetElements: walls={curtainWallsData.Count} openings={allOpenings.Count} wallsInWork={wallsInWork.Count} panels={wallsInWork.Sum(w => w.Panels.Count)}");
             return wallsInWork;
         }
 
@@ -2024,7 +1980,6 @@ namespace CWPanelsCustomizer
                 transf.Origin = ptStart;
             }
 
-            _logger.Info($"[CWPanelsCustomizer] GetWallTransform wall Id={curWall.Id.IntegerValue} Origin=({transf.Origin.X:F3},{transf.Origin.Y:F3},{transf.Origin.Z:F3})");
             return transf;
         }
 

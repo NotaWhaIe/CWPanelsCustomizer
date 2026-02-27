@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Autodesk.Revit.DB;
 
@@ -25,6 +26,7 @@ namespace CWPanelsCustomizer.Helpers
         private readonly string _documentName;
         private string _currentLogPath = null;
         private string _currentCommandName = string.Empty;
+        private StreamWriter _writer = null;
 
         private const int MAX_LOG_FILES = 30; // Хранить последние N файлов логов
 
@@ -105,6 +107,9 @@ namespace CWPanelsCustomizer.Helpers
             {
                 _currentLogPath = Path.Combine(_logsDir, baseName + ".log");
 
+                _writer?.Dispose();
+                _writer = new StreamWriter(_currentLogPath, false, Encoding.UTF8, 65536);
+
                 CleanupOldLogs();
             }
 
@@ -124,6 +129,9 @@ namespace CWPanelsCustomizer.Helpers
 
             lock (_instanceLock)
             {
+                _writer?.Flush();
+                _writer?.Dispose();
+                _writer = null;
                 _currentLogPath = null;
                 _currentCommandName = string.Empty;
             }
@@ -255,13 +263,10 @@ namespace CWPanelsCustomizer.Helpers
                 // Дублировать в Debug Output IDE
                 System.Diagnostics.Debug.WriteLine(logLine);
 
-                // Записать в файл
+                // Записать в файл (StreamWriter с буфером, открыт на весь сеанс)
                 lock (_instanceLock)
                 {
-                    if (_currentLogPath != null)
-                    {
-                        File.AppendAllText(_currentLogPath, logLine + Environment.NewLine);
-                    }
+                    _writer?.WriteLine(logLine);
                 }
             }
             catch
