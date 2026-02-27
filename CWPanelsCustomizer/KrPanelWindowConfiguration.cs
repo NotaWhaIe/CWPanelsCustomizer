@@ -5,8 +5,6 @@ using System.Linq;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
-using Autodesk.Revit.DB.Events;
-using Autodesk.Revit.UI.Events;
 using CWPanelsCustomizer.Helpers;
 
 namespace CWPanelsCustomizer
@@ -86,62 +84,10 @@ namespace CWPanelsCustomizer
         private const string L_PANEL_FAMILY_NAME = "КРСТ_НВФ_С L-образным вырезом";
         private const string L_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
-#if DEBUG
-        // Трёхфазный Debug-цикл (undo-before-run):
-        // Execute() вызывается из Idling-обработчика RevitDllReloadListener.
-        // Нельзя подписаться на Idling из Idling — поэтому используем цепочку:
-        //   Execute() → PostCommand(Undo) → DocumentChanged → subscribe Idling → OnIdlingRunPlugin → RunPluginCore
-        private static CurtainPanelWindowConfiguration _debugInstance;
-        private static bool _waitingForUndo;
-#endif
-
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-#if DEBUG
-            _debugInstance = this;
-            _uiapp = commandData.Application;
-
-            // Шаг 1: подписываемся на DocumentChanged (другое событие — разрешено из Idling)
-            _waitingForUndo = true;
-            _uiapp.Application.DocumentChanged += OnDocumentChangedAfterUndo;
-
-            // Шаг 2: постим Undo (асинхронно, выполнится после возврата из Execute)
-            var undoId = RevitCommandId.LookupPostableCommandId(PostableCommand.Undo);
-            if (_uiapp.CanPostCommand(undoId))
-                _uiapp.PostCommand(undoId);
-            else
-            {
-                // Нечего отменять — запускаем напрямую через Idling на следующем цикле
-                _uiapp.Application.DocumentChanged -= OnDocumentChangedAfterUndo;
-                _waitingForUndo = false;
-                _uiapp.Idling += OnIdlingRunPlugin;
-            }
-
-            return Result.Succeeded;
-#else
             return RunPluginCore(commandData.Application);
-#endif
         }
-
-#if DEBUG
-        // Шаг 3: DocumentChanged срабатывает когда Undo завершился
-        // Здесь мы уже НЕ внутри Idling — можно подписаться на Idling
-        private void OnDocumentChangedAfterUndo(object sender, DocumentChangedEventArgs e)
-        {
-            if (!_waitingForUndo) return;
-            _waitingForUndo = false;
-            _uiapp.Application.DocumentChanged -= OnDocumentChangedAfterUndo;
-            _uiapp.Idling += OnIdlingRunPlugin;
-        }
-
-        // Шаг 4: Idling срабатывает в следующем цикле простоя Revit
-        private void OnIdlingRunPlugin(object sender, IdlingEventArgs e)
-        {
-            _uiapp.Idling -= OnIdlingRunPlugin;
-            try { RunPluginCore(_uiapp); }
-            finally { _debugInstance = null; }
-        }
-#endif
 
         private Result RunPluginCore(UIApplication uiapp)
         {
