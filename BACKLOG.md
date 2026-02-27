@@ -1,6 +1,6 @@
 # Бэклог
 
-## [OPT-001] Ускорение АР→КР замены панелей витража (~300с → ?)
+## [OPT-001] Ускорить замену АР-панелей на КР
 
 **Команда:** `KrPanelWindowConfiguration` → кнопка "Заменить АР кассеты на КР"
 **Файл:** `CWPanelsCustomizer/KrPanelWindowConfiguration.cs`, метод `ReplaceArCurtainPanelsWithKrPanels` (~стр. 217)
