@@ -222,9 +222,7 @@ namespace CWPanelsCustomizer
             const string AR_TYPE_PREFIX_3 = "Кассета";
 
             if (doc == null)
-            {
                 throw new ArgumentNullException(nameof(doc));
-            }
 
             // 1a) Wall-панели витража
             // 1b) FamilyInstance-панели витража (напр. "Системная панель / Кассета_RAL 5005")
@@ -412,10 +410,15 @@ namespace CWPanelsCustomizer
 
             ElementId targetTypeId = targetSymbol.Id;
 
+            const string KR_OFFSET_PARAM  = "Смещение от плоскости фасада";
+
             int replaced = 0;
             int skippedAlreadyKrType = 0;
             int skippedInvalid = 0;
             int failed = 0;
+            int offsetsTransferred = 0;
+            int offsetsSkippedZero = 0;
+            int offsetsFailed = 0;
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -442,6 +445,12 @@ namespace CWPanelsCustomizer
                             continue;
                         }
 
+                        // Читаем смещение из АР-панели до замены типа
+                        double offsetFt = 0.0;
+                        Parameter arOffsetParam = element.get_Parameter(BuiltInParameter.WALL_LOCATION_LINE_OFFSET_PARAM);
+                        if (arOffsetParam != null && arOffsetParam.StorageType == StorageType.Double)
+                            offsetFt = arOffsetParam.AsDouble();
+
                         bool wasPinned = element.Pinned;
                         if (wasPinned) element.Pinned = false;
 
@@ -449,6 +458,27 @@ namespace CWPanelsCustomizer
                         element.ChangeTypeId(targetTypeId);
 
                         if (wasPinned && element.IsValidObject) element.Pinned = true;
+
+                        // Переносим смещение на КР-панель
+                        if (Math.Abs(offsetFt) < EPS)
+                        {
+                            offsetsSkippedZero++;
+                        }
+                        else
+                        {
+                            FamilyInstance krFi = doc.GetElement(panelId) as FamilyInstance;
+                            Parameter krOffsetParam = krFi?.LookupParameter(KR_OFFSET_PARAM);
+                            if (krOffsetParam != null && !krOffsetParam.IsReadOnly)
+                            {
+                                krOffsetParam.Set(offsetFt);
+                                offsetsTransferred++;
+                            }
+                            else
+                            {
+                                offsetsFailed++;
+                                _logger.Info($"{TAG} Offset not transferred. PanelId={panelIdInt}, offsetFt={offsetFt:F6}, krFi={krFi != null}, paramFound={krOffsetParam != null}");
+                            }
+                        }
 
                         replaced++;
                     }
@@ -470,6 +500,7 @@ namespace CWPanelsCustomizer
             _logger.Info($"{TAG} SUMMARY:");
             _logger.Info($"{TAG}  AR panels processed: {arPanelIds.Count}");
             _logger.Info($"{TAG}  Replaced (AR->KR): {replaced}");
+            _logger.Info($"{TAG}  Offsets transferred: {offsetsTransferred}, zero (skipped): {offsetsSkippedZero}, failed: {offsetsFailed}");
             _logger.Info($"{TAG}  Skipped (already KR type): {skippedAlreadyKrType}");
             _logger.Info($"{TAG}  Skipped (invalid): {skippedInvalid}");
             _logger.Info($"{TAG}  Failed: {failed}");
