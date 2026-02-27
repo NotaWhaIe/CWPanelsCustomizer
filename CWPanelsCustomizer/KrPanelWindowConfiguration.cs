@@ -243,10 +243,7 @@ namespace CWPanelsCustomizer
                          && typeName.StartsWith(AR_TYPE_PREFIX_3, StringComparison.OrdinalIgnoreCase);
 
                 if (isAr)
-                {
                     arPanelIds.Add(id);
-                    _logger.Info($"{TAG} AR FamilyInstance Id={id.IntegerValue} Family='{famName}' Type='{typeName}'");
-                }
                 else
                 {
                     skippedNotAr++;
@@ -352,15 +349,9 @@ namespace CWPanelsCustomizer
                         // ChangeTypeId работает и для Wall, и для FamilyInstance панелей витража
                         element.ChangeTypeId(targetTypeId);
 
-                        // Возвращаем pinned через повторное получение элемента по Id
-                        if (wasPinned)
-                        {
-                            Element after = doc.GetElement(panelId);
-                            if (after != null && after.IsValidObject) after.Pinned = true;
-                        }
+                        if (wasPinned && element.IsValidObject) element.Pinned = true;
 
                         replaced++;
-                        _logger.Info($"{TAG} REPLACED (AR->KR). PanelId={panelIdInt} -> Family='{TARGET_KR_PANEL_FAMILY_NAME}', Type='{TARGET_KR_PANEL_TYPE_NAME}'");
                     }
                     catch (Autodesk.Revit.Exceptions.InvalidObjectException)
                     {
