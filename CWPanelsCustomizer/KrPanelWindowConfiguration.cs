@@ -455,9 +455,9 @@ namespace CWPanelsCustomizer
             int offsetsSkippedZero = 0;
             int offsetsFailed = 0;
 
-            // Маппинг Wall-панелей витража → нормаль их витражной стены.
-            // Нужен для TX2: проекция на плоскость стены вместо 3D-расстояния.
-            var panelToNormal = new Dictionary<ElementId, XYZ>();
+            // Маппинг Wall-панелей витража → (нормаль, Id витражной стены).
+            // Нужен для TX2: проекция на плоскость стены + scoping по витражу.
+            var panelToCwInfo = new Dictionary<ElementId, (XYZ normal, int cwIdInt)>();
             {
                 var allWallPanelIds = new HashSet<ElementId>(allWallPanels.Select(w => w.Id));
                 var curtainWalls = new FilteredElementCollector(doc)
@@ -466,17 +466,18 @@ namespace CWPanelsCustomizer
                 foreach (var cw in curtainWalls)
                 {
                     XYZ n = (cw.Orientation ?? XYZ.BasisY).Normalize();
+                    int cwId = cw.Id.IntegerValue;
                     foreach (var depId in cw.GetDependentElements(new ElementClassFilter(typeof(Wall))))
                         if (allWallPanelIds.Contains(depId))
-                            panelToNormal[depId] = n;
+                            panelToCwInfo[depId] = (n, cwId);
                 }
-                _logger.Info($"{TAG} panelToNormal built: {panelToNormal.Count} Wall panels mapped");
+                _logger.Info($"{TAG} panelToCwInfo built: {panelToCwInfo.Count} Wall panels mapped");
             }
 
             // Wall→FI замены: после ChangeTypeId старый ID инвалидируется (Revit создаёт новый элемент).
             // Сохраняем BB (Min/Max) до замены; после TX1 матчим по перекрытию BoundingBox в плоскости стены.
             // BB-overlap не зависит от систематического смещения центров (~16мм) — нужна только > 50% площадь.
-            var wallPendingOffsets = new List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal)>();
+            var wallPendingOffsets = new List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal, int cwIdInt)>();
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -514,13 +515,19 @@ namespace CWPanelsCustomizer
 
                         if (isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
-                            // Сохраняем BB + нормаль витражной стены для TX2-матчинга по перекрытию
+                            // Сохраняем BB + нормаль + cwId витражной стены для TX2-матчинга по перекрытию
                             BoundingBoxXYZ preBb = element.get_BoundingBox(null);
                             if (preBb != null)
                             {
-                                XYZ wallNormal = panelToNormal.TryGetValue(panelId, out var n) ? n : XYZ.BasisY;
-                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal));
-                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
+                                XYZ wallNormal = XYZ.BasisY;
+                                int cwIdInt = -1;
+                                if (panelToCwInfo.TryGetValue(panelId, out var cwInfo))
+                                {
+                                    wallNormal = cwInfo.normal;
+                                    cwIdInt = cwInfo.cwIdInt;
+                                }
+                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal, cwIdInt));
+                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
                             }
                         }
                         else if (Math.Abs(offsetFt) < EPS)
@@ -593,21 +600,44 @@ namespace CWPanelsCustomizer
                     })
                     .ToList();
 
-                _logger.Info($"{TAG} TX2: wallPending={wallPendingOffsets.Count}, krFiPool={krFiPanels.Count}");
+                // Группировка KR-панелей по витражной стене (Host)
+                var krByCw = krFiPanels
+                    .GroupBy(fi => fi.Host?.Id.IntegerValue ?? -1)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+
+                _logger.Info($"{TAG} TX2: wallPending={wallPendingOffsets.Count}, krFiPool={krFiPanels.Count}, cwGroups={krByCw.Count}");
+                foreach (var kvp in krByCw.OrderByDescending(k => k.Value.Count).Take(10))
+                    _logger.Info($"{TAG} TX2: cwId={kvp.Key} krCount={kvp.Value.Count}");
 
                 using (Transaction tx2 = new Transaction(doc, "Transfer AR offsets to KR panels"))
                 {
                     tx2.Start();
 
                     // Матчинг по перекрытию BoundingBox в плоскости стены.
-                    // Горизонтальная ось в плоскости: xVec = (-n.Y, n.X, 0).
-                    // Вертикальная ось: BasisZ (витражи всегда вертикальны).
-                    // AR-панель и соответствующая KR-панель занимают одну ячейку сетки → overlap ≈ 100%.
-                    // Соседние ячейки не пересекаются → overlap = 0. Порог: 50%.
+                    // Scoped: кандидаты только из того же витража (cwIdInt).
+                    // Dedup: matchedKrIds исключает повторное назначение.
                     const double MIN_OVERLAP = 0.5;
+                    var matchedKrIds = new HashSet<int>();
+                    int noCwGroupCount = 0;
 
-                    foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal) in wallPendingOffsets)
+                    foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal, cwIdInt) in wallPendingOffsets)
                     {
+                        // Выбираем кандидатов: только из того же витража
+                        List<FamilyInstance> candidates;
+                        bool usedFallback = false;
+                        if (krByCw.TryGetValue(cwIdInt, out var cwCandidates))
+                        {
+                            candidates = cwCandidates;
+                        }
+                        else
+                        {
+                            // Fallback: не нашли группу — используем весь пул (не должно случаться)
+                            candidates = krFiPanels;
+                            usedFallback = true;
+                            noCwGroupCount++;
+                            _logger.Info($"{TAG} [TX2-WARN] cwId={cwIdInt} not in krByCw, using full pool");
+                        }
+
                         // Горизонтальная ось в плоскости стены
                         XYZ xVec = new XYZ(-wallNormal.Y, wallNormal.X, 0).Normalize();
 
@@ -620,8 +650,10 @@ namespace CWPanelsCustomizer
                         FamilyInstance best = null;
                         double bestOverlap = 0;
 
-                        foreach (var fi in krFiPanels)
+                        foreach (var fi in candidates)
                         {
+                            if (matchedKrIds.Contains(fi.Id.IntegerValue)) continue;
+
                             BoundingBoxXYZ fiBb = fi.get_BoundingBox(null);
                             if (fiBb == null) continue;
 
@@ -636,17 +668,18 @@ namespace CWPanelsCustomizer
                             if (overlapFrac > bestOverlap) { bestOverlap = overlapFrac; best = fi; }
                         }
 
-                        _logger.Info($"{TAG} [TX2] offsetMm={offsetFt * FEET_TO_MM:F0} → bestId={best?.Id.IntegerValue} overlap={bestOverlap:P0}");
+                        _logger.Info($"{TAG} [TX2] cwId={cwIdInt} candidates={candidates.Count} offsetMm={offsetFt * FEET_TO_MM:F0} → bestId={best?.Id.IntegerValue} overlap={bestOverlap:P0}{(usedFallback ? " FALLBACK" : "")}");
 
                         if (best != null && bestOverlap >= MIN_OVERLAP)
                         {
+                            matchedKrIds.Add(best.Id.IntegerValue);
                             Parameter krP = best.LookupParameter(KR_OFFSET_PARAM);
                             if (krP != null && !krP.IsReadOnly)
                             {
                                 krP.Set(offsetFt);
                                 offsetsTransferred++;
                                 _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
-                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
+                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
                             }
                             else
                             {
@@ -657,9 +690,11 @@ namespace CWPanelsCustomizer
                         else
                         {
                             offsetsFailed++;
-                            _logger.Info($"{TAG} [NOMATCH] bestOverlap={bestOverlap:P0} < {MIN_OVERLAP:P0}");
+                            _logger.Info($"{TAG} [NOMATCH] cwId={cwIdInt} bestOverlap={bestOverlap:P0} < {MIN_OVERLAP:P0}");
                         }
                     }
+
+                    _logger.Info($"{TAG} [TX2-SUMMARY] matched={matchedKrIds.Count} noMatch={offsetsFailed} noCwGroup={noCwGroupCount}");
 
                     tx2.Commit();
                 }
