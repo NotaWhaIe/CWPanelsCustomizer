@@ -29,11 +29,14 @@ namespace CWPanelsCustomizer
         private const double EDGE_OFFSET_MM        = 150.0; private const double EDGE_OFFSET_FT        = EDGE_OFFSET_MM        / FEET_TO_MM;
         private const double GAP_FILL_MAX_MM       = 600.0; private const double GAP_FILL_MAX_FT       = GAP_FILL_MAX_MM       / FEET_TO_MM;
         private const double COLUMN_SNAP_DIST_MM   = 140.0; private const double COLUMN_SNAP_DIST_FT   = COLUMN_SNAP_DIST_MM   / FEET_TO_MM;
-        private const double MAX_FACADE_DIST_FT    = 1000.0 / FEET_TO_MM;
+        private const double MAX_FACADE_DIST_FT          = 1000.0 / FEET_TO_MM;
+        private const double OPENING_MATCH_TOLERANCE_FT  = 50.0  / FEET_TO_MM;
 
-        // Кронштейны
-        private const double BRACKET_OFFSET_DEFAULT_MM = 200.0, BRACKET_OFFSET_SHORT_MM = 150.0;
-        private const double BRACKET_STEP_MID_MM       = 600.0, BRACKET_STEP_SHORT_MM   = 300.0;
+        // Кронштейны (в футах)
+        private const double BRACKET_OFFSET_DEFAULT_FT = 200.0 / FEET_TO_MM;
+        private const double BRACKET_OFFSET_SHORT_FT   = 150.0 / FEET_TO_MM;
+        private const double BRACKET_STEP_MID_FT        = 600.0 / FEET_TO_MM;
+        private const double BRACKET_STEP_SHORT_FT      = 300.0 / FEET_TO_MM;
 
         // Индексы проёма [hCenter, zMin, zMax, hLeft, hRight]
         private const int OP_H_CENTER = 0, OP_Z_MIN = 1, OP_Z_MAX = 2, OP_H_LEFT = 3, OP_H_RIGHT = 4;
@@ -124,21 +127,16 @@ namespace CWPanelsCustomizer
 
             // --- Фильтр по выделению ---
             bool selectionMode = false;
+            ICollection<ElementId> selIds = _uidoc.Selection.GetElementIds();
+            if (selIds.Count > 0)
             {
-                ICollection<ElementId> selIds = _uidoc.Selection.GetElementIds();
-                if (selIds.Count > 0)
+                var selIdSet = new HashSet<int>(selIds.Select(id => id.IntegerValue));
+                List<Wall> selectedNvf = nvfCurtainWalls.Where(w => selIdSet.Contains(w.Id.IntegerValue)).ToList();
+                if (selectedNvf.Count > 0)
                 {
-                    var selIdSet = new HashSet<int>(selIds.Select(id => id.IntegerValue));
-                    List<Wall> selectedNvf = nvfCurtainWalls
-                        .Where(w => selIdSet.Contains(w.Id.IntegerValue))
-                        .ToList();
-                    if (selectedNvf.Count > 0)
-                    {
-                        selectionMode = true;
-                        nvfCurtainWalls = selectedNvf;
-                        _logger.Info("Mode: SELECTION — processing "
-                            + selectedNvf.Count + " selected НВФ wall(s)");
-                    }
+                    selectionMode = true;
+                    nvfCurtainWalls = selectedNvf;
+                    _logger.Info("Mode: SELECTION — processing " + selectedNvf.Count + " selected НВФ wall(s)");
                 }
             }
             if (!selectionMode)
@@ -396,78 +394,35 @@ namespace CWPanelsCustomizer
             // Проёмы (фильтр по фасаду) и рёбра контура
             const string openingFamilyName = "#_Оконный проем_Прямоугольный";
             List<double[]> openingDataList = CollectWindowOpenings(openingFamilyName, wallHorizontal, workPlane);
-            const double OPENING_MATCH_TOLERANCE_FT = 50.0 / FEET_TO_MM;
 
             // Фильтр проёмов по 2D-контуру витража (устраняет дубли на общем фасаде)
+            int openingsBefore = openingDataList.Count;
+            openingDataList = openingDataList
+                .Where(op => op[OP_H_CENTER] >= wallHMin - OPENING_MATCH_TOLERANCE_FT
+                          && op[OP_H_CENTER] <= wallHMax + OPENING_MATCH_TOLERANCE_FT
+                          && op[OP_Z_MIN] < wallZMax - 0.001
+                          && op[OP_Z_MAX] > wallZMin + 0.001)
+                .ToList();
+            if (openingDataList.Count != openingsBefore)
+                _logger.Info("  Openings filtered to wall bounds: " + openingDataList.Count + " (was " + openingsBefore + ")");
+
+            // Один проход по non-NVF витражам: зоны для фильтрации проёмов и excludeZones
+            GetFacadeAlignedNonNvfZones(nonNvfWalls, workPlane, wallHorizontal,
+                out List<double[]> nonNvfAllZones, out List<double[]> excludeZones);
+
+            if (nonNvfAllZones.Count > 0)
             {
                 int before = openingDataList.Count;
                 openingDataList = openingDataList
-                    .Where(op => op[OP_H_CENTER] >= wallHMin - OPENING_MATCH_TOLERANCE_FT
-                              && op[OP_H_CENTER] <= wallHMax + OPENING_MATCH_TOLERANCE_FT
-                              && op[OP_Z_MIN] < wallZMax - 0.001
-                              && op[OP_Z_MAX] > wallZMin + 0.001)
+                    .Where(op => !nonNvfAllZones.Any(zone =>
+                        op[OP_H_CENTER] >= zone[EZ_H_MIN] - 0.001 && op[OP_H_CENTER] <= zone[EZ_H_MAX] + 0.001 &&
+                        op[OP_Z_MIN] < zone[EZ_Z_MAX] + 0.001 && op[OP_Z_MAX] > zone[EZ_Z_MIN] - 0.001))
                     .ToList();
                 if (openingDataList.Count != before)
-                    _logger.Info("  Openings filtered to wall bounds: " + openingDataList.Count + " (was " + before + ")");
-            }
-
-            // Исключить проёмы за не-НВФ витражами (они закрывают окна несущей стены)
-            {
-                var nonNvfFilterZones = new List<double[]>(); // [hLeft, hRight, zBot, zTop]
-                foreach (Wall nonNvfWall in nonNvfWalls)
-                {
-                    XYZ nnNormal = GetWallNormal(nonNvfWall);
-                    if (nnNormal == null) continue;
-                    if (Math.Abs(nnNormal.DotProduct(workPlane.Normal)) < 0.95) continue;
-
-                    XYZ nnCenter = GetWallBBCenter(nonNvfWall);
-                    if (Math.Abs(workPlane.Normal.DotProduct(nnCenter - workPlane.Origin)) > MAX_FACADE_DIST_FT) continue;
-
-                    BoundingBoxXYZ nnBB = nonNvfWall.get_BoundingBox(null);
-                    if (nnBB == null) continue;
-
-                    GetHorizontalRange(nnBB, wallHorizontal, out double nnHMin, out double nnHMax);
-                    nonNvfFilterZones.Add(new[] { nnHMin, nnHMax, nnBB.Min.Z, nnBB.Max.Z });
-                }
-
-                if (nonNvfFilterZones.Count > 0)
-                {
-                    int before = openingDataList.Count;
-                    openingDataList = openingDataList
-                        .Where(op => !nonNvfFilterZones.Any(zone =>
-                            op[OP_H_CENTER] >= zone[EZ_H_MIN] - 0.001 && op[OP_H_CENTER] <= zone[EZ_H_MAX] + 0.001 &&
-                            op[OP_Z_MIN] < zone[EZ_Z_MAX] + 0.001 && op[OP_Z_MAX] > zone[EZ_Z_MIN] - 0.001))
-                        .ToList();
-                    if (openingDataList.Count != before)
-                        _logger.Info("  Openings filtered (non-НВФ curtain walls): " + openingDataList.Count + " (was " + before + ")");
-                }
+                    _logger.Info("  Openings filtered (non-НВФ curtain walls): " + openingDataList.Count + " (was " + before + ")");
             }
 
             List<double[]> outlineEdges = GetWallOutlineVerticalEdges(targetWall, wallHorizontal);
-
-            // Зоны исключения: не-НВФ витражи на фасаде → стойки не ставятся в их контурах
-            var excludeZones = new List<double[]>();
-            foreach (Wall nonNvfWall in nonNvfWalls)
-            {
-                if (!HasSubstantialPanels(nonNvfWall)) continue;
-
-                XYZ nnNormal = GetWallNormal(nonNvfWall);
-                if (nnNormal == null) continue;
-                if (Math.Abs(nnNormal.DotProduct(workPlane.Normal)) < 0.95) continue;
-
-                XYZ nnCenter = GetWallBBCenter(nonNvfWall);
-                double nnDist = Math.Abs(workPlane.Normal.DotProduct(nnCenter - workPlane.Origin));
-                if (nnDist > MAX_FACADE_DIST_FT) continue;
-
-                BoundingBoxXYZ nnBB = nonNvfWall.get_BoundingBox(null);
-                if (nnBB == null) continue;
-
-                GetHorizontalRange(nnBB, wallHorizontal, out double exHMin, out double exHMax);
-                excludeZones.Add(new[] { exHMin, exHMax, nnBB.Min.Z, nnBB.Max.Z });
-                _logger.Info("  ExcludeZone non-НВФ Id=" + nonNvfWall.Id.IntegerValue
-                    + " H=" + FormatFeetMm(exHMin) + ".." + FormatFeetMm(exHMax)
-                    + " Z=" + FormatFeetMm(nnBB.Min.Z) + ".." + FormatFeetMm(nnBB.Max.Z));
-            }
 
             // --- Этап 3: Размещение стоек по линиям сетки ---
             int created = 0;
@@ -480,8 +435,8 @@ namespace CWPanelsCustomizer
                 double bottomZ = snappedZ[i] + RACK_START_OFFSET_FT;
                 double topZ = actualTopZ[i];
 
-                double gridH_trim = wallHorizontal.DotProduct(bottomPt);
-                TrimGridLineByOutlineEdges(outlineEdges, gridH_trim, ref bottomZ, ref topZ);
+                double gridLineHPos = wallHorizontal.DotProduct(bottomPt);
+                TrimGridLineByOutlineEdges(outlineEdges, gridLineHPos, ref bottomZ, ref topZ);
 
                 bool wasSnapped = Math.Abs(snappedZ[i] - bottomPt.Z) > 0.001;
                 string snapInfo = wasSnapped ? " snap=" + FormatFeetMm(snappedZ[i]) : "";
@@ -492,12 +447,8 @@ namespace CWPanelsCustomizer
                     continue;
                 }
 
-                double gridLineHPos = wallHorizontal.DotProduct(bottomPt);
-
-                List<double[]> matchingOpenings = FindOpeningsOverlappingGridLine(
-                    openingDataList, gridLineHPos);
-                List<double[]> freeSegments = GetFreeSegments(bottomZ, topZ, matchingOpenings);
-                freeSegments = SubtractExcludeZones(freeSegments, GetZExcludesForH(excludeZones, gridLineHPos));
+                List<double[]> matchingOpenings = FindOpeningsOverlappingGridLine(openingDataList, gridLineHPos);
+                List<double[]> freeSegments = ComputeFreeSegments(bottomZ, topZ, matchingOpenings, gridLineHPos, excludeZones);
 
                 _logger.Info("  GridLine[" + origIdx + "] Id=" + validGridLines[i].Id.IntegerValue
                     + snapInfo
@@ -539,11 +490,7 @@ namespace CWPanelsCustomizer
                             ? nearEdge + EDGE_OFFSET_FT
                             : nearEdge - EDGE_OFFSET_FT;
 
-                        double refH = wallHorizontal.DotProduct(bottomPt);
-                        XYZ sideBasePt = new XYZ(
-                            bottomPt.X + wallHorizontal.X * (sideH - refH),
-                            bottomPt.Y + wallHorizontal.Y * (sideH - refH),
-                            0);
+                        XYZ sideBasePt = ComputeBasePoint(bottomPt, wallHorizontal, sideH);
 
                         _logger.Info("    SideRacks: gridH=" + FormatFeetMm(gridLineHPos)
                             + " windowCenter=" + FormatFeetMm(oCenter)
@@ -571,179 +518,17 @@ namespace CWPanelsCustomizer
                 }
             }
 
-            // --- Этап 4: Размещение стоек по краям витража ---
-            _logger.Info("  === Edge mullion placement ===");
-            List<double[]> mergedEdges = ExtendOutlineEdgesZ(outlineEdges);
-            _logger.Info("  Wall outline vertical edges: " + outlineEdges.Count + " (after extend: " + mergedEdges.Count + ")");
+            // --- Этапы 4-6: краевые стойки, зоны исключения, gap-fill ---
+            created += PlaceEdgeMullions(outlineEdges, bottomPoints, actualTopZ, snappedZ,
+                wallHorizontal, (wallHMin + wallHMax) * 0.5,
+                openingDataList, excludeZones, workPlane, sketchPlane, symbol, rackColumns);
 
-            foreach (var edge in mergedEdges)
-            {
-                double edgeH = edge[0];
-                double edgeZBot = edge[1];
-                double edgeZTop = edge[2];
+            created += PlaceZoneEdgeRacks(excludeZones, wallHMin, wallHMax,
+                bottomPoints, wallHorizontal, workPlane, sketchPlane, symbol, rackColumns);
 
-                _logger.Info("  OutlineEdge: H=" + FormatFeetMm(edgeH)
-                    + " Z=" + FormatFeetMm(edgeZBot) + ".." + FormatFeetMm(edgeZTop));
-
-                double mullionH = ComputeEdgeMullionHPos(
-                    edgeH, edgeZBot, edgeZTop,
-                    bottomPoints, actualTopZ, snappedZ, wallHorizontal,
-                    (wallHMin + wallHMax) * 0.5);
-
-                bool tooCloseToGrid = false;
-                for (int i = 0; i < bottomPoints.Count; i++)
-                {
-                    double gridH = wallHorizontal.DotProduct(bottomPoints[i]);
-                    if (Math.Abs(gridH - mullionH) < EDGE_OFFSET_FT * 0.5
-                        && actualTopZ[i] > edgeZBot + 0.01
-                        && snappedZ[i] < edgeZTop - 0.01)
-                    {
-                        tooCloseToGrid = true;
-                        break;
-                    }
-                }
-                if (tooCloseToGrid)
-                {
-                    _logger.Info("    Skip: too close to existing grid line");
-                    continue;
-                }
-
-                double edgeBottomZ = edgeZBot + RACK_START_OFFSET_FT;
-                double edgeTopZ = edgeZTop;
-
-                if (edgeTopZ - edgeBottomZ < RACK_MIN_HEIGHT_FT * 0.5 - 0.001)
-                {
-                    _logger.Info("    Skip: height too small (" + FormatFeetMm(edgeTopZ - edgeBottomZ) + ")");
-                    continue;
-                }
-
-                XYZ refPt = bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin;
-                double edgeRefH = wallHorizontal.DotProduct(refPt);
-                XYZ edgeBasePt = new XYZ(
-                    refPt.X + wallHorizontal.X * (mullionH - edgeRefH),
-                    refPt.Y + wallHorizontal.Y * (mullionH - edgeRefH),
-                    0);
-
-                List<double[]> edgeOpenings = FindOpeningsForGridLine(
-                    openingDataList, mullionH, OPENING_MATCH_TOLERANCE_FT);
-                List<double[]> edgeSegments = GetFreeSegments(edgeBottomZ, edgeTopZ, edgeOpenings);
-                edgeSegments = SubtractExcludeZones(edgeSegments, GetZExcludesForH(excludeZones, mullionH));
-
-                _logger.Info("    EdgeMullion: H=" + FormatFeetMm(mullionH)
-                    + " Z=" + FormatFeetMm(edgeBottomZ) + ".." + FormatFeetMm(edgeTopZ)
-                    + " openings=" + edgeOpenings.Count
-                    + " segments=" + edgeSegments.Count);
-
-                rackColumns.Add(new[] { mullionH, edgeBasePt.X, edgeBasePt.Y, edgeBottomZ, edgeTopZ });
-                created += PlaceRacksInSegments(edgeSegments, edgeBasePt, workPlane, sketchPlane, symbol, "edge_piece");
-            }
-
-            // --- Этап 5: Боковые стойки по краям зон исключения (не-НВФ витражи) ---
-            // Не-НВФ витраж с содержательными панелями трактуется как проём:
-            // ставятся стойки на 150 мм от его горизонтальных краёв (аналогично оконным).
-            _logger.Info("  === Non-НВФ zone edge racks (Stage 5) ===");
-            foreach (var zone in excludeZones)
-            {
-                double exHMin = zone[EZ_H_MIN], exHMax = zone[EZ_H_MAX];
-                double exZMin = zone[EZ_Z_MIN], exZMax = zone[EZ_Z_MAX];
-
-                double sideZBot = exZMin;
-                double sideZTop = exZMax - OPENING_TOP_OFFSET_FT;
-                if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
-
-                foreach (double sideH in new[] { exHMin - EDGE_OFFSET_FT, exHMax + EDGE_OFFSET_FT })
-                {
-                    // Проверяем, что sideH попадает в диапазон текущего НВФ витража
-                    if (sideH < wallHMin - OPENING_MATCH_TOLERANCE_FT
-                        || sideH > wallHMax + OPENING_MATCH_TOLERANCE_FT) continue;
-
-                    // Не ставить если слишком близко к линии сетки
-                    bool tooClose = false;
-                    for (int i = 0; i < bottomPoints.Count; i++)
-                    {
-                        if (Math.Abs(wallHorizontal.DotProduct(bottomPoints[i]) - sideH) < EDGE_OFFSET_FT * 0.5)
-                        { tooClose = true; break; }
-                    }
-                    if (tooClose) continue;
-
-                    XYZ refPt5 = bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin;
-                    double refH5 = wallHorizontal.DotProduct(refPt5);
-                    XYZ zoneEdgeBasePt = new XYZ(
-                        refPt5.X + wallHorizontal.X * (sideH - refH5),
-                        refPt5.Y + wallHorizontal.Y * (sideH - refH5),
-                        0);
-
-                    var sideSegs5 = new List<double[]> { new[] { sideZBot, sideZTop } };
-                    sideSegs5 = SubtractExcludeZones(sideSegs5, GetZExcludesForH(excludeZones, sideH));
-
-                    _logger.Info("    ZoneEdge: H=" + FormatFeetMm(sideH)
-                        + " Z=" + FormatFeetMm(sideZBot) + ".." + FormatFeetMm(sideZTop)
-                        + " segments=" + sideSegs5.Count);
-
-                    rackColumns.Add(new[] { sideH, zoneEdgeBasePt.X, zoneEdgeBasePt.Y, sideZBot, sideZTop });
-                    created += PlaceRacksInSegments(sideSegs5, zoneEdgeBasePt, workPlane, sketchPlane, symbol, "zone_edge");
-                }
-            }
-
-            // --- Этап 6: Gap-fill — добавляем стойку в промежутки > 600мм ---
-            _logger.Info("  === Gap filling (max " + GAP_FILL_MAX_MM + "mm between racks) ===");
-
-            rackColumns.Sort((a, b) => a[RC_H].CompareTo(b[RC_H]));
-
-            // Дедупликация: убрать позиции ближе 5 мм друг к другу
-            for (int k = rackColumns.Count - 1; k > 0; k--)
-                if (Math.Abs(rackColumns[k][RC_H] - rackColumns[k - 1][RC_H]) < 5.0 / FEET_TO_MM)
-                    rackColumns.RemoveAt(k);
-
-            int gapCount = RunGapFillPass(
-                workColumns: rackColumns,
-                snapColumns: rackColumns,
-                sharedFacadeSnapCols: sharedFacadeColumns,
-                allRackColumns: rackColumns,
-                wallHorizontal: wallHorizontal,
-                wallZMin: wallZMin,
-                wallZMax: wallZMax,
-                outlineEdges: outlineEdges,
-                openingDataList: openingDataList,
-                excludeZones: excludeZones,
-                workPlane: workPlane,
-                sketchPlane: sketchPlane,
-                symbol: symbol,
-                logLabel: "GapFill",
-                created: ref created);
-            _logger.Info("  Gap fill: " + gapCount + " positions added");
-
-            // --- Этап 6б: Gap-fill — нижний уровень (side_piece не участвуют) ---
-            {
-                double groundThreshold = wallZMin + RACK_START_OFFSET_FT + (300.0 / FEET_TO_MM);
-                var groundCols = rackColumns
-                    .Where(col => col[RC_BOT_Z] <= groundThreshold)
-                    .OrderBy(col => col[RC_H])
-                    .ToList();
-                var groundSnapShared = sharedFacadeColumns
-                    .Where(col => col[RC_BOT_Z] <= groundThreshold)
-                    .ToList();
-
-                int gf2Count = RunGapFillPass(
-                    workColumns: groundCols,
-                    snapColumns: groundCols,
-                    sharedFacadeSnapCols: groundSnapShared,
-                    allRackColumns: rackColumns,
-                    wallHorizontal: wallHorizontal,
-                    wallZMin: wallZMin,
-                    wallZMax: wallZMax,
-                    outlineEdges: outlineEdges,
-                    openingDataList: openingDataList,
-                    excludeZones: excludeZones,
-                    workPlane: workPlane,
-                    sketchPlane: sketchPlane,
-                    symbol: symbol,
-                    logLabel: "GapFill2",
-                    created: ref created);
-
-                if (gf2Count > 0)
-                    _logger.Info("  Gap fill (ground level): " + gf2Count + " positions added");
-            }
+            created += RunGapFillStages(rackColumns, sharedFacadeColumns,
+                wallHorizontal, wallZMin, wallZMax,
+                outlineEdges, openingDataList, excludeZones, workPlane, sketchPlane, symbol);
 
             // --- Диагностика: непокрытые КРСТ_НВФ_ панели ---
             {
@@ -782,6 +567,129 @@ namespace CWPanelsCustomizer
 
             // Передаём позиции этого витража в общий список фасада для snap следующих витражей
             sharedFacadeColumns.AddRange(rackColumns);
+
+            return created;
+        }
+
+        // Этап 4: краевые стойки по вертикальным рёбрам контура стены.
+        private int PlaceEdgeMullions(
+            List<double[]> outlineEdges,
+            List<XYZ> bottomPoints, double[] actualTopZ, double[] snappedZ,
+            XYZ wallHorizontal, double wallHCenter,
+            List<double[]> openingDataList, List<double[]> excludeZones,
+            Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol,
+            List<double[]> rackColumns)
+        {
+            _logger.Info("  === Edge mullion placement ===");
+            List<double[]> mergedEdges = ExtendOutlineEdgesZ(outlineEdges);
+            _logger.Info("  Wall outline vertical edges: " + outlineEdges.Count + " (after extend: " + mergedEdges.Count + ")");
+
+            int created = 0;
+            foreach (var edge in mergedEdges)
+            {
+                double edgeH = edge[0], edgeZBot = edge[1], edgeZTop = edge[2];
+                _logger.Info("  OutlineEdge: H=" + FormatFeetMm(edgeH) + " Z=" + FormatFeetMm(edgeZBot) + ".." + FormatFeetMm(edgeZTop));
+
+                double mullionH = ComputeEdgeMullionHPos(edgeH, edgeZBot, edgeZTop,
+                    bottomPoints, actualTopZ, snappedZ, wallHorizontal, wallHCenter);
+
+                if (IsCloseToAnyGridLine(bottomPoints, wallHorizontal, mullionH, EDGE_OFFSET_FT * 0.5,
+                        actualTopZ, snappedZ, edgeZBot, edgeZTop))
+                {
+                    _logger.Info("    Skip: too close to existing grid line");
+                    continue;
+                }
+
+                double edgeBottomZ = edgeZBot + RACK_START_OFFSET_FT;
+                double edgeTopZ = edgeZTop;
+                if (edgeTopZ - edgeBottomZ < RACK_MIN_HEIGHT_FT * 0.5 - 0.001)
+                {
+                    _logger.Info("    Skip: height too small (" + FormatFeetMm(edgeTopZ - edgeBottomZ) + ")");
+                    continue;
+                }
+
+                XYZ edgeBasePt = ComputeBasePoint(
+                    bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin, wallHorizontal, mullionH);
+                List<double[]> edgeOpenings = FindOpeningsForGridLine(openingDataList, mullionH, OPENING_MATCH_TOLERANCE_FT);
+                List<double[]> edgeSegments = ComputeFreeSegments(edgeBottomZ, edgeTopZ, edgeOpenings, mullionH, excludeZones);
+
+                _logger.Info("    EdgeMullion: H=" + FormatFeetMm(mullionH)
+                    + " Z=" + FormatFeetMm(edgeBottomZ) + ".." + FormatFeetMm(edgeTopZ)
+                    + " openings=" + edgeOpenings.Count + " segments=" + edgeSegments.Count);
+
+                rackColumns.Add(new[] { mullionH, edgeBasePt.X, edgeBasePt.Y, edgeBottomZ, edgeTopZ });
+                created += PlaceRacksInSegments(edgeSegments, edgeBasePt, workPlane, sketchPlane, symbol, "edge_piece");
+            }
+            return created;
+        }
+
+        // Этап 5: боковые стойки по горизонтальным краям зон не-НВФ витражей.
+        private int PlaceZoneEdgeRacks(
+            List<double[]> excludeZones, double wallHMin, double wallHMax,
+            List<XYZ> bottomPoints, XYZ wallHorizontal,
+            Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol,
+            List<double[]> rackColumns)
+        {
+            _logger.Info("  === Non-НВФ zone edge racks (Stage 5) ===");
+            int created = 0;
+            foreach (var zone in excludeZones)
+            {
+                double exHMin = zone[EZ_H_MIN], exHMax = zone[EZ_H_MAX];
+                double sideZBot = zone[EZ_Z_MIN];
+                double sideZTop = zone[EZ_Z_MAX] - OPENING_TOP_OFFSET_FT;
+                if (sideZTop - sideZBot < RACK_MIN_HEIGHT_FT * 0.5) continue;
+
+                foreach (double sideH in new[] { exHMin - EDGE_OFFSET_FT, exHMax + EDGE_OFFSET_FT })
+                {
+                    if (sideH < wallHMin - OPENING_MATCH_TOLERANCE_FT
+                        || sideH > wallHMax + OPENING_MATCH_TOLERANCE_FT) continue;
+                    if (IsCloseToAnyGridLine(bottomPoints, wallHorizontal, sideH, EDGE_OFFSET_FT * 0.5)) continue;
+
+                    XYZ zoneEdgeBasePt = ComputeBasePoint(
+                        bottomPoints.Count > 0 ? bottomPoints[0] : workPlane.Origin, wallHorizontal, sideH);
+                    var sideSegs = new List<double[]> { new[] { sideZBot, sideZTop } };
+                    sideSegs = SubtractExcludeZones(sideSegs, GetZExcludesForH(excludeZones, sideH));
+
+                    _logger.Info("    ZoneEdge: H=" + FormatFeetMm(sideH)
+                        + " Z=" + FormatFeetMm(sideZBot) + ".." + FormatFeetMm(sideZTop)
+                        + " segments=" + sideSegs.Count);
+
+                    rackColumns.Add(new[] { sideH, zoneEdgeBasePt.X, zoneEdgeBasePt.Y, sideZBot, sideZTop });
+                    created += PlaceRacksInSegments(sideSegs, zoneEdgeBasePt, workPlane, sketchPlane, symbol, "zone_edge");
+                }
+            }
+            return created;
+        }
+
+        // Этапы 6 + 6б: Gap-fill промежутков > 600мм.
+        private int RunGapFillStages(
+            List<double[]> rackColumns, List<double[]> sharedFacadeColumns,
+            XYZ wallHorizontal, double wallZMin, double wallZMax,
+            List<double[]> outlineEdges, List<double[]> openingDataList, List<double[]> excludeZones,
+            Plane workPlane, SketchPlane sketchPlane, FamilySymbol symbol)
+        {
+            _logger.Info("  === Gap filling (max " + GAP_FILL_MAX_MM + "mm between racks) ===");
+
+            rackColumns.Sort((a, b) => a[RC_H].CompareTo(b[RC_H]));
+            for (int k = rackColumns.Count - 1; k > 0; k--)
+                if (Math.Abs(rackColumns[k][RC_H] - rackColumns[k - 1][RC_H]) < 5.0 / FEET_TO_MM)
+                    rackColumns.RemoveAt(k);
+
+            int created = 0;
+            int gapCount = RunGapFillPass(rackColumns, rackColumns, sharedFacadeColumns, rackColumns,
+                wallHorizontal, wallZMin, wallZMax, outlineEdges, openingDataList, excludeZones,
+                workPlane, sketchPlane, symbol, "GapFill", ref created);
+            _logger.Info("  Gap fill: " + gapCount + " positions added");
+
+            double groundThreshold = wallZMin + RACK_START_OFFSET_FT + (300.0 / FEET_TO_MM);
+            var groundCols = rackColumns.Where(col => col[RC_BOT_Z] <= groundThreshold).OrderBy(col => col[RC_H]).ToList();
+            var groundSnapShared = sharedFacadeColumns.Where(col => col[RC_BOT_Z] <= groundThreshold).ToList();
+
+            int gf2Count = RunGapFillPass(groundCols, groundCols, groundSnapShared, rackColumns,
+                wallHorizontal, wallZMin, wallZMax, outlineEdges, openingDataList, excludeZones,
+                workPlane, sketchPlane, symbol, "GapFill2", ref created);
+            if (gf2Count > 0)
+                _logger.Info("  Gap fill (ground level): " + gf2Count + " positions added");
 
             return created;
         }
@@ -877,6 +785,28 @@ namespace CWPanelsCustomizer
 
         #region Helpers
 
+        private static XYZ ComputeBasePoint(XYZ refPt, XYZ wallHorizontal, double targetH)
+        {
+            double dH = targetH - wallHorizontal.DotProduct(refPt);
+            return new XYZ(refPt.X + wallHorizontal.X * dH, refPt.Y + wallHorizontal.Y * dH, 0);
+        }
+
+        // Возвращает true, если h находится ближе tolerance к любой линии сетки.
+        // topZ/snappedZ + zBot/zTop — опциональная проверка Z-пересечения.
+        private static bool IsCloseToAnyGridLine(
+            List<XYZ> bottomPoints, XYZ wallHorizontal, double h, double tolerance,
+            double[] topZ = null, double[] snappedZ = null, double zBot = 0, double zTop = 0)
+        {
+            for (int i = 0; i < bottomPoints.Count; i++)
+            {
+                if (Math.Abs(wallHorizontal.DotProduct(bottomPoints[i]) - h) >= tolerance) continue;
+                if (topZ != null && snappedZ != null)
+                    if (topZ[i] <= zBot + 0.01 || snappedZ[i] >= zTop - 0.01) continue;
+                return true;
+            }
+            return false;
+        }
+
         private List<PlanarFace> GetVerticalPlanarFaces(Wall wall)
         {
             var faces = new List<PlanarFace>();
@@ -923,6 +853,35 @@ namespace CWPanelsCustomizer
             if (best != null)
                 _logger.Info("  Matched face: dist=" + FormatFeetMm(bestDist) + " Normal=" + FormatXyz(best.FaceNormal));
             return best;
+        }
+
+        // Один проход по non-NVF витражам: возвращает зоны для фильтрации проёмов (allZones)
+        // и зоны с содержательными панелями для excludeZones (substantialZones).
+        private void GetFacadeAlignedNonNvfZones(
+            List<Wall> nonNvfWalls, Plane workPlane, XYZ wallHorizontal,
+            out List<double[]> allZones, out List<double[]> substantialZones)
+        {
+            allZones = new List<double[]>();
+            substantialZones = new List<double[]>();
+            foreach (Wall w in nonNvfWalls)
+            {
+                XYZ n = GetWallNormal(w);
+                if (n == null || Math.Abs(n.DotProduct(workPlane.Normal)) < 0.95) continue;
+                XYZ c = GetWallBBCenter(w);
+                if (Math.Abs(workPlane.Normal.DotProduct(c - workPlane.Origin)) > MAX_FACADE_DIST_FT) continue;
+                BoundingBoxXYZ bb = w.get_BoundingBox(null);
+                if (bb == null) continue;
+                GetHorizontalRange(bb, wallHorizontal, out double hMin, out double hMax);
+                double[] zone = new[] { hMin, hMax, bb.Min.Z, bb.Max.Z };
+                allZones.Add(zone);
+                if (HasSubstantialPanels(w))
+                {
+                    substantialZones.Add(zone);
+                    _logger.Info("  ExcludeZone non-НВФ Id=" + w.Id.IntegerValue
+                        + " H=" + FormatFeetMm(hMin) + ".." + FormatFeetMm(hMax)
+                        + " Z=" + FormatFeetMm(bb.Min.Z) + ".." + FormatFeetMm(bb.Max.Z));
+                }
+            }
         }
 
         private bool HasNvfPanels(Wall curtainWall)
@@ -1070,6 +1029,13 @@ namespace CWPanelsCustomizer
             }
             result.Sort((a, b) => a[OP_Z_MIN].CompareTo(b[OP_Z_MIN]));
             return result;
+        }
+
+        private List<double[]> ComputeFreeSegments(double botZ, double topZ,
+            List<double[]> openings, double hPos, List<double[]> excludeZones)
+        {
+            var segments = GetFreeSegments(botZ, topZ, openings);
+            return SubtractExcludeZones(segments, GetZExcludesForH(excludeZones, hPos));
         }
 
         private List<double[]> GetFreeSegments(double bottomZ, double topZ, List<double[]> sortedOpenings)
@@ -1321,17 +1287,17 @@ namespace CWPanelsCustomizer
             double heightMm = heightFt * FEET_TO_MM;
             if (heightMm >= 1200.0)
             {
-                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_DEFAULT_MM / FEET_TO_MM);
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_DEFAULT_FT);
             }
             else if (heightMm >= 900.0)
             {
-                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_MM / FEET_TO_MM);
-                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_MID_MM / FEET_TO_MM);
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_FT);
+                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_MID_FT);
             }
             else if (heightMm >= 600.0)
             {
-                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_MM / FEET_TO_MM);
-                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_SHORT_MM / FEET_TO_MM);
+                TrySetParameter(inst, "Отступ 1 кронштейна", BRACKET_OFFSET_SHORT_FT);
+                TrySetParameter(inst, "Кронштейн_Шаг", BRACKET_STEP_SHORT_FT);
             }
         }
 
@@ -1412,12 +1378,8 @@ namespace CWPanelsCustomizer
                         }
                     }
 
-                    double dH = midH - workColumns[i][RC_H];
                     XYZ leftPt = new XYZ(workColumns[i][RC_X], workColumns[i][RC_Y], 0);
-                    XYZ midBasePt = new XYZ(
-                        leftPt.X + wallHorizontal.X * dH,
-                        leftPt.Y + wallHorizontal.Y * dH,
-                        0);
+                    XYZ midBasePt = ComputeBasePoint(leftPt, wallHorizontal, midH);
 
                     double midBotZ = Math.Min(
                         Math.Min(workColumns[i][RC_BOT_Z], workColumns[i + 1][RC_BOT_Z]),
@@ -1429,8 +1391,7 @@ namespace CWPanelsCustomizer
                     TrimGridLineByOutlineEdges(outlineEdges, midH, ref midBotZ, ref midTopZ);
 
                     List<double[]> gapOpenings = FindOpeningsOverlappingGridLine(openingDataList, midH);
-                    List<double[]> gapSegments = GetFreeSegments(midBotZ, midTopZ, gapOpenings);
-                    gapSegments = SubtractExcludeZones(gapSegments, GetZExcludesForH(excludeZones, midH));
+                    List<double[]> gapSegments = ComputeFreeSegments(midBotZ, midTopZ, gapOpenings, midH, excludeZones);
 
                     _logger.Info("    " + logLabel + "[" + gapIter + "]: H=" + FormatFeetMm(midH)
                         + " gap=" + FormatFeetMm(gap)
