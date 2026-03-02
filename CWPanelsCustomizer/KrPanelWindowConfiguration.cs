@@ -70,6 +70,7 @@ namespace CWPanelsCustomizer
         private static readonly List<(int krFiId, int origArTypeId)> _undoRecord
             = new List<(int, int)>();
 
+
         private const double EPS = 1e-9;
         private const double FEET_TO_MM = 304.8;
 
