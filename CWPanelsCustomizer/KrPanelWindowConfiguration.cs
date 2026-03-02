@@ -522,13 +522,24 @@ namespace CWPanelsCustomizer
                         int origArTypeId = element.GetTypeId().IntegerValue;
 
                         // Читаем MaterialId с типа AR-панели до замены типа
-                        // "Материал несущих конструкций" — параметр ТИПА, не экземпляра
+                        // Wall-панели: параметр типа "Материал несущих конструкций" (WallType)
+                        // FI-панели: параметр типа "Материал" (FamilySymbol "Системная панель")
                         int materialIdInt = -1;
                         {
                             Element arType = doc.GetElement(element.GetTypeId());
+
+                            // 1) "Материал несущих конструкций" на типе (WallType)
                             Parameter arMatParam = arType?.LookupParameter("Материал несущих конструкций");
                             if (arMatParam != null && arMatParam.StorageType == StorageType.ElementId)
                                 materialIdInt = arMatParam.AsElementId().IntegerValue;
+
+                            // 2) Fallback: "Материал" на типе (FamilySymbol — FI-панели)
+                            if (materialIdInt <= 0)
+                            {
+                                Parameter matParam = arType?.LookupParameter("Материал");
+                                if (matParam != null && matParam.StorageType == StorageType.ElementId)
+                                    materialIdInt = matParam.AsElementId().IntegerValue;
+                            }
                         }
 
                         // FI-панели: WALL_LOCATION_LINE_OFFSET_PARAM не существует на FamilyInstance
