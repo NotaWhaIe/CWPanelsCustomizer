@@ -456,8 +456,11 @@ namespace CWPanelsCustomizer
             int offsetsFailed = 0;
             int materialsTransferred = 0;
             int materialsFailed = 0;
+            int materialParam2Transferred = 0;
+            int materialParam2Failed = 0;
 
             const string KR_COLOR_PARAM = "Цвет по шкале RAL (н/в)";
+            const string KR_MATERIAL_PARAM = "Кассета_Материал отделки";
             const string KR_ANGLE_PARAM = "Угол_Слева";
 
             // Маппинг Wall-панелей витража → (нормаль, Id витражной стены).
@@ -518,10 +521,12 @@ namespace CWPanelsCustomizer
                         bool isWallPanel = element is Wall;
                         int origArTypeId = element.GetTypeId().IntegerValue;
 
-                        // Читаем MaterialId с AR-панели до замены типа
+                        // Читаем MaterialId с типа AR-панели до замены типа
+                        // "Материал несущих конструкций" — параметр ТИПА, не экземпляра
                         int materialIdInt = -1;
                         {
-                            Parameter arMatParam = element.LookupParameter("Материал несущих конструкций");
+                            Element arType = doc.GetElement(element.GetTypeId());
+                            Parameter arMatParam = arType?.LookupParameter("Материал несущих конструкций");
                             if (arMatParam != null && arMatParam.StorageType == StorageType.ElementId)
                                 materialIdInt = arMatParam.AsElementId().IntegerValue;
                         }
@@ -621,6 +626,29 @@ namespace CWPanelsCustomizer
                             {
                                 materialsFailed++;
                                 _logger.Info($"{TAG} [FI-MAT-FAIL] Id={panelIdInt} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
+                            }
+
+                            // Запись в "Кассета_Материал отделки" (параметр экземпляра, ElementId или String)
+                            Parameter krMatP = krElem?.LookupParameter(KR_MATERIAL_PARAM);
+                            if (krMatP != null && !krMatP.IsReadOnly)
+                            {
+                                if (krMatP.StorageType == StorageType.ElementId)
+                                {
+                                    krMatP.Set(new ElementId(materialIdInt));
+                                    materialParam2Transferred++;
+                                    _logger.Info($"{TAG} [FI-MAT2] Id={panelIdInt} matId={materialIdInt} ok");
+                                }
+                                else if (krMatP.StorageType == StorageType.String && mat != null)
+                                {
+                                    krMatP.Set(mat.Name);
+                                    materialParam2Transferred++;
+                                    _logger.Info($"{TAG} [FI-MAT2] Id={panelIdInt} mat='{mat.Name}' ok (string)");
+                                }
+                            }
+                            else
+                            {
+                                materialParam2Failed++;
+                                _logger.Info($"{TAG} [FI-MAT2-FAIL] Id={panelIdInt} matId={materialIdInt} paramFound={krMatP != null}");
                             }
                         }
 
@@ -775,6 +803,29 @@ namespace CWPanelsCustomizer
                                     materialsFailed++;
                                     _logger.Info($"{TAG} [TX2-MAT-FAIL] KRFIId={best.Id.IntegerValue} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
                                 }
+
+                                // Запись в "Кассета_Материал отделки" (параметр экземпляра, ElementId или String)
+                                Parameter krMatP = best.LookupParameter(KR_MATERIAL_PARAM);
+                                if (krMatP != null && !krMatP.IsReadOnly)
+                                {
+                                    if (krMatP.StorageType == StorageType.ElementId)
+                                    {
+                                        krMatP.Set(new ElementId(materialIdInt));
+                                        materialParam2Transferred++;
+                                        _logger.Info($"{TAG} [TX2-MAT2] KRFIId={best.Id.IntegerValue} matId={materialIdInt} ok");
+                                    }
+                                    else if (krMatP.StorageType == StorageType.String && mat != null)
+                                    {
+                                        krMatP.Set(mat.Name);
+                                        materialParam2Transferred++;
+                                        _logger.Info($"{TAG} [TX2-MAT2] KRFIId={best.Id.IntegerValue} mat='{mat.Name}' ok (string)");
+                                    }
+                                }
+                                else
+                                {
+                                    materialParam2Failed++;
+                                    _logger.Info($"{TAG} [TX2-MAT2-FAIL] KRFIId={best.Id.IntegerValue} matId={materialIdInt} paramFound={krMatP != null}");
+                                }
                             }
 
                             _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
@@ -797,6 +848,7 @@ namespace CWPanelsCustomizer
             _logger.Info($"{TAG}  Replaced (AR->KR): {replaced}");
             _logger.Info($"{TAG}  Offsets transferred: {offsetsTransferred}, failed: {offsetsFailed}");
             _logger.Info($"{TAG}  Materials transferred: {materialsTransferred}, failed: {materialsFailed}");
+            _logger.Info($"{TAG}  MaterialParam2 (Кассета_Материал отделки): {materialParam2Transferred}, failed: {materialParam2Failed}");
             _logger.Info($"{TAG}  Skipped (already KR type): {skippedAlreadyKrType}");
             _logger.Info($"{TAG}  Skipped (invalid): {skippedInvalid}");
             _logger.Info($"{TAG}  Failed: {failed}");
