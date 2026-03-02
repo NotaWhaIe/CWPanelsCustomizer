@@ -458,6 +458,7 @@ namespace CWPanelsCustomizer
             int materialsFailed = 0;
 
             const string KR_COLOR_PARAM = "Цвет по шкале RAL (н/в)";
+            const string KR_ANGLE_PARAM = "Угол_Слева";
 
             // Маппинг Wall-панелей витража → (нормаль, Id витражной стены).
             // Нужен для TX2: проекция на плоскость стены + scoping по витражу.
@@ -581,6 +582,12 @@ namespace CWPanelsCustomizer
                         {
                             // Записываем в undo даже при нулевом смещении (для отката типа)
                             _undoRecord.Add((panelId.IntegerValue, origArTypeId));
+
+                            // Угол_Слева = 0 — инициализация перед прочими параметрами
+                            Element krElemAngle = doc.GetElement(panelId);
+                            Parameter krAngleP = krElemAngle?.LookupParameter(KR_ANGLE_PARAM);
+                            if (krAngleP != null && !krAngleP.IsReadOnly)
+                                krAngleP.Set(0.0);
                         }
                         if (!isWallPanel && Math.Abs(offsetFt) >= EPS)
                         {
@@ -725,6 +732,16 @@ namespace CWPanelsCustomizer
                         {
                             matchedKrIds.Add(best.Id.IntegerValue);
                             _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
+
+                            // Угол_Слева = 0 — инициализация перед прочими параметрами
+                            Parameter krAngleP = best.LookupParameter(KR_ANGLE_PARAM);
+                            if (krAngleP != null && !krAngleP.IsReadOnly)
+                            {
+                                krAngleP.Set(0.0);
+                                _logger.Info($"{TAG} [ANGLE] KRFIId={best.Id.IntegerValue} Угол_Слева=0 ok");
+                            }
+                            else
+                                _logger.Info($"{TAG} [ANGLE-WARN] KRFIId={best.Id.IntegerValue} param not found/readonly");
 
                             // Перенос offset
                             if (Math.Abs(offsetFt) >= EPS)
