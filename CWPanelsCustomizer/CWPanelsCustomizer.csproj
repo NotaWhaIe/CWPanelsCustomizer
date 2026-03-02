@@ -71,7 +71,10 @@
     <Compile Include="ArPanelsCutByOpenings.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
     <Compile Include="Helpers\RevitLogger.cs" />
+    <Compile Include="CurtainWallDtos.cs" />
     <Compile Include="KrPanelWindowConfiguration.cs" />
+    <Compile Include="KrPanelWindowConfiguration.Stages.cs" />
+    <Compile Include="KrPanelWindowConfiguration.Helpers.cs" />
     <Compile Include="KrModelStateLogger.cs" />
     <Compile Include="KrMullionPlacement.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
