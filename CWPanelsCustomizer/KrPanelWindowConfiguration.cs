@@ -459,6 +459,7 @@ namespace CWPanelsCustomizer
 
             const string KR_COLOR_PARAM = "Цвет по шкале RAL (н/в)";
             const string KR_ANGLE_PARAM = "Угол_Слева";
+            const string KR_MATERIAL_PARAM = "Кассета_Материал отделки";
 
             // Маппинг Wall-панелей витража → (нормаль, Id витражной стены).
             // Нужен для TX2: проекция на плоскость стены + scoping по витражу.
@@ -622,6 +623,16 @@ namespace CWPanelsCustomizer
                                 materialsFailed++;
                                 _logger.Info($"{TAG} [FI-MAT-FAIL] Id={panelIdInt} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
                             }
+
+                            // Кассета_Материал отделки — перенос MaterialId напрямую
+                            Parameter krMatP = krElem?.LookupParameter(KR_MATERIAL_PARAM);
+                            if (krMatP != null && !krMatP.IsReadOnly)
+                            {
+                                if (krMatP.StorageType == StorageType.ElementId)
+                                    krMatP.Set(new ElementId(materialIdInt));
+                                else if (krMatP.StorageType == StorageType.String && mat != null)
+                                    krMatP.Set(mat.Name);
+                            }
                         }
 
                         replaced++;
@@ -774,6 +785,16 @@ namespace CWPanelsCustomizer
                                 {
                                     materialsFailed++;
                                     _logger.Info($"{TAG} [TX2-MAT-FAIL] KRFIId={best.Id.IntegerValue} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
+                                }
+
+                                // Кассета_Материал отделки — перенос MaterialId напрямую
+                                Parameter krMatP = best.LookupParameter(KR_MATERIAL_PARAM);
+                                if (krMatP != null && !krMatP.IsReadOnly)
+                                {
+                                    if (krMatP.StorageType == StorageType.ElementId)
+                                        krMatP.Set(new ElementId(materialIdInt));
+                                    else if (krMatP.StorageType == StorageType.String && mat != null)
+                                        krMatP.Set(mat.Name);
                                 }
                             }
 
