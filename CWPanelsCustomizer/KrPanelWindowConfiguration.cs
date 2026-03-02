@@ -213,31 +213,60 @@ namespace CWPanelsCustomizer
         }
 
         /// <summary>Откат предыдущего запуска: сброс смещения + возврат типа AR.</summary>
-        private void UndoPreviousRun(Document doc, string tag)
+        /// <param name="scopeIds">Если не null — откатить только записи с krFiId из этого набора.
+        /// Записи вне scope сохраняются в _undoRecord для будущих запусков.</param>
+        private void UndoPreviousRun(Document doc, string tag, HashSet<int> scopeIds = null)
         {
             if (_undoRecord.Count == 0) return;
-            _logger.Info($"{tag} [UNDO] Откат предыдущего запуска: {_undoRecord.Count} панелей");
+
+            // Определяем, какие записи откатываем
+            List<(int krFiId, int origArTypeId)> toUndo;
+            if (scopeIds != null)
+                toUndo = _undoRecord.Where(r => scopeIds.Contains(r.krFiId)).ToList();
+            else
+                toUndo = new List<(int, int)>(_undoRecord);
+
+            if (toUndo.Count == 0)
+            {
+                _logger.Info($"{tag} [UNDO] scope={scopeIds?.Count ?? -1}, nothing to undo (total records={_undoRecord.Count})");
+                return;
+            }
+
+            _logger.Info($"{tag} [UNDO] Откат: {toUndo.Count} из {_undoRecord.Count} панелей (scope={(scopeIds != null ? scopeIds.Count.ToString() : "ALL")})");
             using (Transaction tx = new Transaction(doc, "Откат AR→KR (debug)"))
             {
                 tx.Start();
                 int ok = 0, skip = 0;
-                foreach (var (krFiId, origArTypeId) in _undoRecord)
+                var undoneIds = new HashSet<int>();
+                foreach (var (krFiId, origArTypeId) in toUndo)
                 {
                     try
                     {
                         Element e = doc.GetElement(new ElementId(krFiId));
-                        if (e == null || !e.IsValidObject) { skip++; continue; }
+                        if (e == null || !e.IsValidObject) { skip++; undoneIds.Add(krFiId); continue; }
                         Parameter p = e.LookupParameter("Смещение от плоскости фасада");
                         if (p != null && !p.IsReadOnly) p.Set(0.0);
                         if (origArTypeId > 0) e.ChangeTypeId(new ElementId(origArTypeId));
                         ok++;
+                        undoneIds.Add(krFiId);
                     }
-                    catch { skip++; }
+                    catch { skip++; undoneIds.Add(krFiId); }
                 }
                 tx.Commit();
                 _logger.Info($"{tag} [UNDO] ok={ok} skip={skip}");
             }
-            _undoRecord.Clear();
+
+            // Удаляем только откаченные записи, остальные сохраняем
+            if (scopeIds != null)
+            {
+                var undoneSet = new HashSet<int>(toUndo.Select(r => r.krFiId));
+                _undoRecord.RemoveAll(r => undoneSet.Contains(r.krFiId));
+                _logger.Info($"{tag} [UNDO] Remaining undo records: {_undoRecord.Count}");
+            }
+            else
+            {
+                _undoRecord.Clear();
+            }
         }
 
         private void ReplaceArCurtainPanelsWithKrPanels(Document doc)
@@ -245,8 +274,11 @@ namespace CWPanelsCustomizer
             const string TAG = "[ReplaceArCurtainPanelsWithKrPanels]";
             const string KR_OFFSET_PARAM = "Смещение от плоскости фасада";
 
-            // 0) Откат предыдущего запуска
-            UndoPreviousRun(doc, TAG);
+            // 0) Откат предыдущего запуска (только для панелей в текущем scope)
+            HashSet<int> undoScope = null;
+            if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
+                undoScope = new HashSet<int>(_selectedPanelIds.Select(id => id.IntegerValue));
+            UndoPreviousRun(doc, TAG, undoScope);
 
             // Целевой КР-тип
             const string TARGET_KR_PANEL_FAMILY_NAME = REGULAR_PANEL_FAMILY_NAME;
@@ -771,6 +803,10 @@ namespace CWPanelsCustomizer
                         {
                             matchedKrIds.Add(best.Id.IntegerValue);
                             _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
+
+                            // Обновляем _selectedPanelIds новым Id (Wall→FI: Id меняется после ChangeTypeId)
+                            if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
+                                _selectedPanelIds.Add(new ElementId(best.Id.IntegerValue));
 
                             // Угол_Слева = 0 — инициализация перед прочими параметрами
                             Parameter krAngleP = best.LookupParameter(KR_ANGLE_PARAM);
@@ -2131,6 +2167,11 @@ namespace CWPanelsCustomizer
 
                 foreach (ElementId pid in grid.GetPanelIds())
                 {
+                    // В режиме ByPanels — обрабатываем только выделенные панели (и их новые Id после ChangeTypeId)
+                    if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null
+                        && !_selectedPanelIds.Contains(pid))
+                        continue;
+
                     FamilyInstance panelFi = doc.GetElement(pid) as FamilyInstance;
                     if (panelFi == null) continue;
 
