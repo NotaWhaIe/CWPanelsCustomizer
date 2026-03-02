@@ -453,8 +453,11 @@ namespace CWPanelsCustomizer
             int skippedInvalid = 0;
             int failed = 0;
             int offsetsTransferred = 0;
-            int offsetsSkippedZero = 0;
             int offsetsFailed = 0;
+            int materialsTransferred = 0;
+            int materialsFailed = 0;
+
+            const string KR_COLOR_PARAM = "Цвет по шкале RAL (н/в)";
 
             // Маппинг Wall-панелей витража → (нормаль, Id витражной стены).
             // Нужен для TX2: проекция на плоскость стены + scoping по витражу.
@@ -478,7 +481,7 @@ namespace CWPanelsCustomizer
             // Wall→FI замены: после ChangeTypeId старый ID инвалидируется (Revit создаёт новый элемент).
             // Сохраняем BB (Min/Max) до замены; после TX1 матчим по перекрытию BoundingBox в плоскости стены.
             // BB-overlap не зависит от систематического смещения центров (~16мм) — нужна только > 50% площадь.
-            var wallPendingOffsets = new List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal, int cwIdInt)>();
+            var wallPendingOffsets = new List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal, int cwIdInt, int materialIdInt)>();
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -514,9 +517,42 @@ namespace CWPanelsCustomizer
                         bool isWallPanel = element is Wall;
                         int origArTypeId = element.GetTypeId().IntegerValue;
 
-                        if (isWallPanel && Math.Abs(offsetFt) >= EPS)
+                        // Читаем MaterialId с AR-панели до замены типа
+                        int materialIdInt = -1;
                         {
-                            // Сохраняем BB + нормаль + cwId витражной стены для TX2-матчинга по перекрытию
+                            Parameter arMatParam = element.LookupParameter("Материал несущих конструкций");
+                            if (arMatParam != null && arMatParam.StorageType == StorageType.ElementId)
+                                materialIdInt = arMatParam.AsElementId().IntegerValue;
+                        }
+
+                        // FI-панели: WALL_LOCATION_LINE_OFFSET_PARAM не существует на FamilyInstance
+                        // → геометрический расчёт offset от плоскости витражной стены
+                        if (!isWallPanel && Math.Abs(offsetFt) < EPS)
+                        {
+                            FamilyInstance fi = element as FamilyInstance;
+                            Wall hostCw = fi?.Host as Wall;
+                            if (hostCw != null)
+                            {
+                                LocationCurve lc = hostCw.Location as LocationCurve;
+                                if (lc != null)
+                                {
+                                    XYZ wallNormal = hostCw.Orientation.Normalize();
+                                    XYZ wallPt = lc.Curve.Evaluate(0.5, true);
+                                    BoundingBoxXYZ pbb = element.get_BoundingBox(null);
+                                    if (pbb != null)
+                                    {
+                                        XYZ panelCenter = (pbb.Min + pbb.Max) / 2.0;
+                                        offsetFt = Math.Abs((panelCenter - wallPt).DotProduct(wallNormal));
+                                        _logger.Info($"{TAG} [FI-GEO] Id={panelIdInt} geoOffsetMm={offsetFt * FEET_TO_MM:F1}");
+                                    }
+                                }
+                            }
+                        }
+
+                        if (isWallPanel)
+                        {
+                            // Сохраняем BB + нормаль + cwId + materialId для TX2-матчинга
+                            // Включаем ВСЕ Wall, в т.ч. с нулевым offset — материал нужно перенести всегда
                             BoundingBoxXYZ preBb = element.get_BoundingBox(null);
                             if (preBb != null)
                             {
@@ -527,13 +563,9 @@ namespace CWPanelsCustomizer
                                     wallNormal = cwInfo.normal;
                                     cwIdInt = cwInfo.cwIdInt;
                                 }
-                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal, cwIdInt));
-                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
+                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal, cwIdInt, materialIdInt));
+                                _logger.Info($"{TAG} [AR-Wall] Id={panelIdInt} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} matId={materialIdInt} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
                             }
-                        }
-                        else if (Math.Abs(offsetFt) < EPS)
-                        {
-                            offsetsSkippedZero++;
                         }
 
                         bool wasPinned = element.Pinned;
@@ -564,6 +596,24 @@ namespace CWPanelsCustomizer
                             {
                                 offsetsFailed++;
                                 _logger.Info($"{TAG} Offset not transferred (FI). PanelId={panelIdInt}, offsetFt={offsetFt:F6}, paramFound={krOffsetParam != null}");
+                            }
+                        }
+                        // FI-панели: перенос материала сразу (ID не меняется)
+                        if (!isWallPanel && materialIdInt > 0)
+                        {
+                            Element krElem = doc.GetElement(panelId);
+                            Material mat = doc.GetElement(new ElementId(materialIdInt)) as Material;
+                            Parameter krColorP = krElem?.LookupParameter(KR_COLOR_PARAM);
+                            if (mat != null && krColorP != null && !krColorP.IsReadOnly && krColorP.StorageType == StorageType.String)
+                            {
+                                krColorP.Set(mat.Name);
+                                materialsTransferred++;
+                                _logger.Info($"{TAG} [FI-MAT] Id={panelIdInt} matId={materialIdInt} mat='{mat.Name}' ok");
+                            }
+                            else
+                            {
+                                materialsFailed++;
+                                _logger.Info($"{TAG} [FI-MAT-FAIL] Id={panelIdInt} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
                             }
                         }
 
@@ -621,7 +671,7 @@ namespace CWPanelsCustomizer
                     var matchedKrIds = new HashSet<int>();
                     int noCwGroupCount = 0;
 
-                    foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal, cwIdInt) in wallPendingOffsets)
+                    foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal, cwIdInt, materialIdInt) in wallPendingOffsets)
                     {
                         // Выбираем кандидатов: только из того же витража
                         List<FamilyInstance> candidates;
@@ -674,19 +724,43 @@ namespace CWPanelsCustomizer
                         if (best != null && bestOverlap >= MIN_OVERLAP)
                         {
                             matchedKrIds.Add(best.Id.IntegerValue);
-                            Parameter krP = best.LookupParameter(KR_OFFSET_PARAM);
-                            if (krP != null && !krP.IsReadOnly)
+                            _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
+
+                            // Перенос offset
+                            if (Math.Abs(offsetFt) >= EPS)
                             {
-                                krP.Set(offsetFt);
-                                offsetsTransferred++;
-                                _undoRecord.Add((best.Id.IntegerValue, origArTypeId));
-                                _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
+                                Parameter krP = best.LookupParameter(KR_OFFSET_PARAM);
+                                if (krP != null && !krP.IsReadOnly)
+                                {
+                                    krP.Set(offsetFt);
+                                    offsetsTransferred++;
+                                }
+                                else
+                                {
+                                    offsetsFailed++;
+                                    _logger.Info($"{TAG} [FAIL-param] KRFIId={best.Id.IntegerValue} paramFound={krP != null}");
+                                }
                             }
-                            else
+
+                            // Перенос материала → "Цвет по шкале RAL (н/в)"
+                            if (materialIdInt > 0)
                             {
-                                offsetsFailed++;
-                                _logger.Info($"{TAG} [FAIL-param] KRFIId={best.Id.IntegerValue} paramFound={krP != null}");
+                                Material mat = doc.GetElement(new ElementId(materialIdInt)) as Material;
+                                Parameter krColorP = best.LookupParameter(KR_COLOR_PARAM);
+                                if (mat != null && krColorP != null && !krColorP.IsReadOnly && krColorP.StorageType == StorageType.String)
+                                {
+                                    krColorP.Set(mat.Name);
+                                    materialsTransferred++;
+                                    _logger.Info($"{TAG} [TX2-MAT] KRFIId={best.Id.IntegerValue} matId={materialIdInt} ok");
+                                }
+                                else
+                                {
+                                    materialsFailed++;
+                                    _logger.Info($"{TAG} [TX2-MAT-FAIL] KRFIId={best.Id.IntegerValue} matId={materialIdInt} paramFound={krColorP != null} mat={mat != null}");
+                                }
                             }
+
+                            _logger.Info($"{TAG} [MATCH] KRFIId={best.Id.IntegerValue} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} overlap={bestOverlap:P0} ✓");
                         }
                         else
                         {
@@ -704,7 +778,8 @@ namespace CWPanelsCustomizer
             _logger.Info($"{TAG} SUMMARY:");
             _logger.Info($"{TAG}  AR panels processed: {arPanelIds.Count}");
             _logger.Info($"{TAG}  Replaced (AR->KR): {replaced}");
-            _logger.Info($"{TAG}  Offsets transferred: {offsetsTransferred}, zero (skipped): {offsetsSkippedZero}, failed: {offsetsFailed}");
+            _logger.Info($"{TAG}  Offsets transferred: {offsetsTransferred}, failed: {offsetsFailed}");
+            _logger.Info($"{TAG}  Materials transferred: {materialsTransferred}, failed: {materialsFailed}");
             _logger.Info($"{TAG}  Skipped (already KR type): {skippedAlreadyKrType}");
             _logger.Info($"{TAG}  Skipped (invalid): {skippedInvalid}");
             _logger.Info($"{TAG}  Failed: {failed}");
