@@ -240,11 +240,11 @@ namespace CWPanelsCustomizer
         // ===========================
 
         /// <summary>
-        /// Перенос параметров КР-панели: undo-запись, Угол_Слева=0, смещение, материал.
+        /// Перенос параметров КР-панели: Угол_Слева=0, смещение, материал.
         /// Вызывается из TX1 (FI-панели с неизменным Id) и TX2 (Wall→FI, после матчинга).
         /// </summary>
         private void TransferKrParameters(
-            Element krElement, double offsetFt, int materialIdInt, int origArTypeId,
+            Element krElement, double offsetFt, int materialIdInt,
             Document doc, string tag,
             ref int offsetsTransferred, ref int offsetsFailed,
             ref int materialsTransferred, ref int materialsFailed,
@@ -256,9 +256,6 @@ namespace CWPanelsCustomizer
             const string KR_ANGLE_PARAM    = "Угол_Слева";
 
             int elemId = krElement.Id.IntegerValue;
-
-            // Undo-запись (даже при нулевом смещении — для отката типа AR→KR)
-            _undoRecord.Add((elemId, origArTypeId));
 
             // Угол_Слева = 0 — инициализация перед прочими параметрами
             Parameter krAngleP = krElement.LookupParameter(KR_ANGLE_PARAM);

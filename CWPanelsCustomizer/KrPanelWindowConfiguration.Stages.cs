@@ -15,9 +15,8 @@ namespace CWPanelsCustomizer
         private void MirrorPanelsRightOfOpenings(List<CurtainWallDataDto> data)
         {
             // v6: Local X side detection (как в рабочем методе) + правила для L / Г_В2 / Рядовая_В3
-            // + запись отладки в "Комментарий"
 
-            const string TAG = "[MirrorPanelsRightOfOpenings v6_LocalRules_Debug]";
+            const string TAG = "[MirrorPanelsRightOfOpenings v6_LocalRules]";
             const double SIDE_TOL_MM = 1.0;     // панели на оси окна не трогаем
             const double BAND_EXPAND_MM = 5.0;  // слегка расширяем bbox окна, чтобы увереннее ловить пересечение
 
@@ -92,22 +91,7 @@ namespace CWPanelsCustomizer
                 return false;
             }
 
-            void SetCommentSafe(Element e, string text)
-            {
-                if (e == null) return;
-                try
-                {
-                    var p = e.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
-                    if (p == null || p.IsReadOnly) return;
-                    p.Set(text);
-                }
-                catch
-                {
-                    // не валим транзакцию из-за комментария
-                }
-            }
-
-            using (var t = new Transaction(_doc, "CW: Mirror panels by opening side (Local + Rules + Debug)"))
+            using (var t = new Transaction(_doc, "CW: Mirror panels by opening side (Local + Rules)"))
             {
                 t.Start();
                 //_doc.Regenerate();
@@ -190,9 +174,6 @@ namespace CWPanelsCustomizer
 
                             bool isRight = dx > sideTolFt;
                             bool isLeft = dx < -sideTolFt;
-                            string sideText = isRight ? "СПРАВА" : (isLeft ? "СЛЕВА" : "НА ОСИ");
-
-                            string panelTypeText = isL ? "L" : (isG ? "Г_В2" : "Рядовая_В3");
 
                             // По ТЗ: делаем действие только когда нужно зеркалить
                             bool needMirror = false;
@@ -208,13 +189,6 @@ namespace CWPanelsCustomizer
 
                             // DTO как “источник истины” по намерению (по правилам)
                             pdto.IsMirrored = needMirror;
-
-                            // Пишем отладку в "Комментарий"
-                            string debug =
-                                $"RW_DEBUG | WallId={wallId} | OpenId={opId} | PanelId={fi.Id.IntegerValue} | Type={panelTypeText} | " +
-                                $"pCenterX={pCenterX:F4} | wCenterX={wCenterX:F4} | dx={dx:F4}ft | Side={sideText} | NeedMirror={(needMirror ? "YES" : "NO")}";
-
-                            SetCommentSafe(fi, debug);
 
                             // На оси — не трогаем
                             if (!isRight && !isLeft)
@@ -235,30 +209,16 @@ namespace CWPanelsCustomizer
                                 if (!flipped)
                                 {
                                     skippedNoFlip++;
-                                    SetCommentSafe(fi, debug + " | RESULT=CANNOT_FLIP");
                                     continue;
                                 }
 
                                 //_doc.Regenerate();
                                 flippedOk++;
-
-                                bool afterMirrored = false;
-                                bool afterHand = false, afterFacing = false;
-                                try
-                                {
-                                    afterMirrored = fi.Mirrored;
-                                    afterHand = fi.HandFlipped;
-                                    afterFacing = fi.FacingFlipped;
-                                }
-                                catch { /* ignore */ }
-
-                                SetCommentSafe(fi, debug + $" | RESULT=FLIPPED | After: Mirrored={afterMirrored} Hand={afterHand} Facing={afterFacing}");
                             }
                             catch (Exception ex)
                             {
                                 flipErrors++;
                                 _logger.Info($"{TAG} ERROR flip wallId={wallId} openingId={opId} panelId={fi.Id.IntegerValue}: {ex}");
-                                SetCommentSafe(fi, debug + " | RESULT=ERROR");
                                 // processedPanels.Add(fi.Id) уже стоит — чтобы не зациклиться на падающей панели
                             }
                         }

@@ -36,12 +36,6 @@ namespace CWPanelsCustomizer
         private int _arReplaced, _arSkippedKrType, _arSkippedInvalid, _arFailed;
         private int _arOffsetsOk, _arOffsetsFail, _arMatsOk, _arMatsFail, _arMat2Ok, _arMat2Fail;
 
-        // --- Авто-отмена предыдущего запуска ---
-        // [(newKrFiId, origArTypeId)]: сбрасывает смещение и откатывает тип AR→KR
-        private static readonly List<(int krFiId, int origArTypeId)> _undoRecord
-            = new List<(int, int)>();
-
-
         private const double EPS = 1e-9;
         private const double FEET_TO_MM = 304.8;
 
@@ -79,6 +73,7 @@ namespace CWPanelsCustomizer
             try
             {
                 RunPlugin();
+                TaskDialog.Show(IS_NAME, $"Замена АР кассет на КР завершена.\nВремя выполнения: {sw.Elapsed.TotalSeconds:F1} сек.");
                 _logger.Info("Execution time: " + sw.ElapsedMilliseconds + "ms");
                 _logger.EndSession("Succeeded");
                 return Result.Succeeded;
@@ -203,75 +198,12 @@ namespace CWPanelsCustomizer
             _logger.Info($"[Selection] Mode=All (selected {selectedIds.Count} non-CW elements)");
         }
 
-        /// <summary>Откат предыдущего запуска: сброс смещения + возврат типа AR.</summary>
-        /// <param name="scopeIds">Если не null — откатить только записи с krFiId из этого набора.
-        /// Записи вне scope сохраняются в _undoRecord для будущих запусков.</param>
-        private void UndoPreviousRun(Document doc, string tag, HashSet<int> scopeIds = null)
-        {
-            if (_undoRecord.Count == 0) return;
-
-            // Определяем, какие записи откатываем
-            List<(int krFiId, int origArTypeId)> toUndo;
-            if (scopeIds != null)
-                toUndo = _undoRecord.Where(r => scopeIds.Contains(r.krFiId)).ToList();
-            else
-                toUndo = new List<(int, int)>(_undoRecord);
-
-            if (toUndo.Count == 0)
-            {
-                _logger.Info($"{tag} [UNDO] scope={scopeIds?.Count ?? -1}, nothing to undo (total records={_undoRecord.Count})");
-                return;
-            }
-
-            _logger.Info($"{tag} [UNDO] Откат: {toUndo.Count} из {_undoRecord.Count} панелей (scope={(scopeIds != null ? scopeIds.Count.ToString() : "ALL")})");
-            using (Transaction tx = new Transaction(doc, "Откат AR→KR (debug)"))
-            {
-                tx.Start();
-                int ok = 0, skip = 0;
-                var undoneIds = new HashSet<int>();
-                foreach (var (krFiId, origArTypeId) in toUndo)
-                {
-                    try
-                    {
-                        Element e = doc.GetElement(new ElementId(krFiId));
-                        if (e == null || !e.IsValidObject) { skip++; undoneIds.Add(krFiId); continue; }
-                        Parameter p = e.LookupParameter("Смещение от плоскости фасада");
-                        if (p != null && !p.IsReadOnly) p.Set(0.0);
-                        if (origArTypeId > 0) e.ChangeTypeId(new ElementId(origArTypeId));
-                        ok++;
-                        undoneIds.Add(krFiId);
-                    }
-                    catch { skip++; undoneIds.Add(krFiId); }
-                }
-                tx.Commit();
-                _logger.Info($"{tag} [UNDO] ok={ok} skip={skip}");
-            }
-
-            // Удаляем только откаченные записи, остальные сохраняем
-            if (scopeIds != null)
-            {
-                var undoneSet = new HashSet<int>(toUndo.Select(r => r.krFiId));
-                _undoRecord.RemoveAll(r => undoneSet.Contains(r.krFiId));
-                _logger.Info($"{tag} [UNDO] Remaining undo records: {_undoRecord.Count}");
-            }
-            else
-            {
-                _undoRecord.Clear();
-            }
-        }
-
         private void ReplaceArCurtainPanelsWithKrPanels(Document doc)
         {
             const string TAG = "[ReplaceArCurtainPanelsWithKrPanels]";
 
             _arReplaced = _arSkippedKrType = _arSkippedInvalid = _arFailed = 0;
             _arOffsetsOk = _arOffsetsFail = _arMatsOk = _arMatsFail = _arMat2Ok = _arMat2Fail = 0;
-
-            // 0) Откат предыдущего запуска (только для панелей в текущем scope)
-            HashSet<int> undoScope = null;
-            if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
-                undoScope = new HashSet<int>(_selectedPanelIds.Select(id => id.IntegerValue));
-            UndoPreviousRun(doc, TAG, undoScope);
 
             // 1) Сбор АР-панелей
             var (arPanelIds, panelToCwInfo) = CollectArPanelData(doc, TAG);
@@ -444,12 +376,12 @@ namespace CWPanelsCustomizer
             return targetSymbol;
         }
 
-        private List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal, int cwIdInt, int materialIdInt)>
+        private List<(XYZ bbMin, XYZ bbMax, double offsetFt, XYZ wallNormal, int cwIdInt, int materialIdInt)>
             ExecuteTx1_ReplaceTypes(Document doc, string tag, List<ElementId> arPanelIds, FamilySymbol targetSymbol,
                 Dictionary<ElementId, (XYZ normal, int cwIdInt)> panelToCwInfo)
         {
             ElementId targetTypeId = targetSymbol.Id;
-            var wallPendingOffsets = new List<(XYZ, XYZ, double, int, XYZ, int, int)>();
+            var wallPendingOffsets = new List<(XYZ, XYZ, double, XYZ, int, int)>();
 
             using (Transaction tx = new Transaction(doc, "Replace ONLY AR curtain panels with KR panels (Family+Type)"))
             {
@@ -480,8 +412,6 @@ namespace CWPanelsCustomizer
                             offsetFt = arOffsetParam.AsDouble();
 
                         bool isWallPanel = element is Wall;
-                        int origArTypeId = element.GetTypeId().IntegerValue;
-
                         int materialIdInt = -1;
                         Element arType = doc.GetElement(element.GetTypeId());
                         Parameter arMatParam = arType?.LookupParameter("Материал несущих конструкций");
@@ -528,7 +458,7 @@ namespace CWPanelsCustomizer
                                     wallNormal = cwInfo.normal;
                                     cwIdInt = cwInfo.cwIdInt;
                                 }
-                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, origArTypeId, wallNormal, cwIdInt, materialIdInt));
+                                wallPendingOffsets.Add((preBb.Min, preBb.Max, offsetFt, wallNormal, cwIdInt, materialIdInt));
                                 _logger.Info($"{tag} [AR-Wall] Id={panelIdInt} cwId={cwIdInt} offsetMm={offsetFt * FEET_TO_MM:F0} matId={materialIdInt} bb=({preBb.Min.X:F3},{preBb.Min.Z:F3})..({preBb.Max.X:F3},{preBb.Max.Z:F3})");
                             }
                         }
@@ -542,7 +472,7 @@ namespace CWPanelsCustomizer
                         {
                             Element krElem = doc.GetElement(panelId);
                             if (krElem != null && krElem.IsValidObject)
-                                TransferKrParameters(krElem, offsetFt, materialIdInt, origArTypeId, doc, $"{tag}[TX1]",
+                                TransferKrParameters(krElem, offsetFt, materialIdInt, doc, $"{tag}[TX1]",
                                     ref _arOffsetsOk, ref _arOffsetsFail,
                                     ref _arMatsOk,   ref _arMatsFail,
                                     ref _arMat2Ok,   ref _arMat2Fail);
@@ -569,7 +499,7 @@ namespace CWPanelsCustomizer
         }
 
         private void ExecuteTx2_TransferOffsets(Document doc, string tag,
-            List<(XYZ bbMin, XYZ bbMax, double offsetFt, int origArTypeId, XYZ wallNormal, int cwIdInt, int materialIdInt)> wallPendingOffsets)
+            List<(XYZ bbMin, XYZ bbMax, double offsetFt, XYZ wallNormal, int cwIdInt, int materialIdInt)> wallPendingOffsets)
         {
             const string TARGET_FAMILY = REGULAR_PANEL_FAMILY_NAME;
             const string TARGET_TYPE   = REGULAR_PANEL_FAMILY_NAME_TYPE;
@@ -601,7 +531,7 @@ namespace CWPanelsCustomizer
                 var matchedKrIds = new HashSet<int>();
                 int noCwGroupCount = 0;
 
-                foreach (var (bbMin, bbMax, offsetFt, origArTypeId, wallNormal, cwIdInt, materialIdInt) in wallPendingOffsets)
+                foreach (var (bbMin, bbMax, offsetFt, wallNormal, cwIdInt, materialIdInt) in wallPendingOffsets)
                 {
                     List<FamilyInstance> candidates;
                     bool usedFallback = false;
@@ -647,7 +577,7 @@ namespace CWPanelsCustomizer
                         if (_selMode == PluginSelectionMode.ByPanels && _selectedPanelIds != null)
                             _selectedPanelIds.Add(new ElementId(best.Id.IntegerValue));
 
-                        TransferKrParameters(best, offsetFt, materialIdInt, origArTypeId, doc, $"{tag}[TX2]",
+                        TransferKrParameters(best, offsetFt, materialIdInt, doc, $"{tag}[TX2]",
                             ref _arOffsetsOk, ref _arOffsetsFail,
                             ref _arMatsOk,   ref _arMatsFail,
                             ref _arMat2Ok,   ref _arMat2Fail);
