@@ -371,7 +371,3 @@ nul
 
 # Large local Revit/test artifacts
 CWPanelsCustomizer/Test/
-*.rvt
-*.rte
-*.7z
-*.7z.*
