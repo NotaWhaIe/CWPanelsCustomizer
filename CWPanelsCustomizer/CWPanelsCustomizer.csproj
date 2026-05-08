@@ -23,7 +23,7 @@
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
-    <PlatformTarget>AnyCPU</PlatformTarget>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>
@@ -32,6 +32,7 @@
     <DefineConstants>TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <PlatformTarget>x64</PlatformTarget>
@@ -69,7 +70,12 @@
     <Compile Include="ArGeneratorStep.cs" />
     <Compile Include="ArPanelsCutByOpenings.cs" />
     <Compile Include="Helpers\SphereByPoint.cs" />
+    <Compile Include="Helpers\RevitLogger.cs" />
+    <Compile Include="CurtainWallDtos.cs" />
     <Compile Include="KrPanelWindowConfiguration.cs" />
+    <Compile Include="KrPanelWindowConfiguration.Stages.cs" />
+    <Compile Include="KrPanelWindowConfiguration.Helpers.cs" />
+    <Compile Include="KrModelStateLogger.cs" />
     <Compile Include="KrMullionPlacement.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Helpers\ClassTemplate.cs" />
@@ -83,6 +89,9 @@
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
-    <PostBuildEvent>xcopy /Y /F "$(SolutionDir)\CWPanelsCustomizer\bin\x64\Debug\CWPanelsCustomizer.dll" "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022"</PostBuildEvent>
+    <PostBuildEvent>xcopy /Y /F "$(TargetPath)" "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022"
+echo %25DATE%25 %25TIME%25 > "%25APPDATA%25\..\..\Documents\Revit_Extensions0\2022\001_Test2022\reload.trigger"
+xcopy /Y /F /I "$(TargetPath)" "\\krost.local\files\A005\B011\C019\Обмен_по_проектам\!_ТИМ\2022\001_Test2022\" 2&gt;nul
+exit 0</PostBuildEvent>
   </PropertyGroup>
 </Project>
