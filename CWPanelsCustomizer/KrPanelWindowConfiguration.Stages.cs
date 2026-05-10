@@ -601,6 +601,15 @@ namespace CWPanelsCustomizer
 
             int openingsProcessed = 0;
             int replaced = 0;
+            int wallsVisited = 0;
+            int wallsSkippedNoOpenings = 0;
+            int wallsSkippedNoRegular = 0;
+            int openingsSkippedNullBBox = 0;
+            int openingsSkippedNoCandidates = 0;
+            int openingsSkippedNoCornerHits = 0;
+            int totalRegularPanels = 0;
+            int totalCandidates = 0;
+            int totalCornerCommonHits = 0;
 
             var alreadyReplaced = new HashSet<ElementId>();
 
@@ -616,6 +625,8 @@ namespace CWPanelsCustomizer
                     if (wallData?.CurtainWallElement == null)
                         continue;
 
+                    wallsVisited++;
+                    int wallId = wallData.CurtainWallElement.Id.IntegerValue;
                     var openings = wallData.IntersectingOpenings ?? new List<OpeningModelDto>();
                     var panels = wallData.Panels ?? new List<CurtainWallPanelDto>();
 
@@ -623,18 +634,35 @@ namespace CWPanelsCustomizer
                         .Where(p => p?.PanelElement != null)
                         .Where(p => p.PanelElement.Symbol?.Family?.Name?.Contains(REGULAR_FAMILY) == true)
                         .ToList();
+                    totalRegularPanels += regularPanels.Count;
 
-                    if (openings.Count == 0 || regularPanels.Count == 0)
+                    _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openings={openings.Count} panels={panels.Count} regularPanels={regularPanels.Count}");
+
+                    if (openings.Count == 0)
+                    {
+                        wallsSkippedNoOpenings++;
                         continue;
+                    }
+
+                    if (regularPanels.Count == 0)
+                    {
+                        wallsSkippedNoRegular++;
+                        continue;
+                    }
 
                     foreach (var opening in openings)
                     {
                         if (opening?.OpeningElement == null)
                             continue;
 
+                        int openingId = opening.OpeningElement.Id.IntegerValue;
                         var ob = opening.LocalBoundingBox;
                         if (ob == null)
+                        {
+                            openingsSkippedNullBBox++;
+                            _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} skip: opening local bbox is null");
                             continue;
+                        }
 
                         openingsProcessed++;
 
@@ -648,21 +676,28 @@ namespace CWPanelsCustomizer
                             if (Intersects3D(ob, reduced))
                                 candidate.Add((p.PanelElement, reduced));
                         }
+                        totalCandidates += candidate.Count;
+
+                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} regularPanels={regularPanels.Count} candidates={candidate.Count} " +
+                                     $"openingLocalX=({ob.Min.X * FEET_TO_MM:F0}..{ob.Max.X * FEET_TO_MM:F0})mm openingLocalZ=({ob.Min.Z * FEET_TO_MM:F0}..{ob.Max.Z * FEET_TO_MM:F0})mm");
 
                         if (candidate.Count == 0)
+                        {
+                            openingsSkippedNoCandidates++;
                             continue;
+                        }
 
                         var windowCornerTL = new XYZ(ob.Min.X, 0, ob.Max.Z);
                         var windowCornerTR = new XYZ(ob.Max.X, 0, ob.Max.Z);
                         var windowCornerBL = new XYZ(ob.Min.X, 0, ob.Min.Z);
                         var windowCornerBR = new XYZ(ob.Max.X, 0, ob.Min.Z);
 
-                        var corners = new List<(XYZ corner, XYZ dirV, XYZ dirH)>
+                        var corners = new List<(string name, XYZ corner, XYZ dirV, XYZ dirH)>
                 {
-                    (windowCornerTL, new XYZ(0,0, 1), new XYZ(-1,0,0)),
-                    (windowCornerTR, new XYZ(0,0, 1), new XYZ( 1,0,0)),
-                    (windowCornerBL, new XYZ(0,0,-1), new XYZ(-1,0,0)),
-                    (windowCornerBR, new XYZ(0,0,-1), new XYZ( 1,0,0)),
+                    ("TL", windowCornerTL, new XYZ(0,0, 1), new XYZ(-1,0,0)),
+                    ("TR", windowCornerTR, new XYZ(0,0, 1), new XYZ( 1,0,0)),
+                    ("BL", windowCornerBL, new XYZ(0,0,-1), new XYZ(-1,0,0)),
+                    ("BR", windowCornerBR, new XYZ(0,0,-1), new XYZ( 1,0,0)),
                 };
 
                         var panelsToReplace = new HashSet<FamilyInstance>();
@@ -679,12 +714,21 @@ namespace CWPanelsCustomizer
                             var hitH = GetHitPanelsBySegment2D(candidate, p1h, p2h);
 
                             var common = hitV.Intersect(hitH).ToList();
+                            totalCornerCommonHits += common.Count;
+
+                            _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} corner={c.name} hitV={hitV.Count} hitH={hitH.Count} common={common.Count} commonIds={string.Join(",", common.Select(fi => fi.Id.IntegerValue))}");
+
                             foreach (var fi in common)
                                 panelsToReplace.Add(fi);
                         }
 
+                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} panelsToReplace={panelsToReplace.Count} ids={string.Join(",", panelsToReplace.Select(fi => fi.Id.IntegerValue))}");
+
                         if (panelsToReplace.Count == 0)
+                        {
+                            openingsSkippedNoCornerHits++;
                             continue;
+                        }
 
                         var windowCenter = CenterOf(ob);
 
@@ -714,6 +758,8 @@ namespace CWPanelsCustomizer
 
                                 alreadyReplaced.Add(panelFi.Id);
                                 replaced++;
+                                _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] REPLACED wallId={wallId} openingId={openingId} panelId={panelFi.Id.IntegerValue} " +
+                                             $"isTop={isTop} targetFamily='{target.FamilyName}' targetType='{target.Name}'");
                             }
                             catch (Exception ex)
                             {
@@ -726,7 +772,10 @@ namespace CWPanelsCustomizer
                 t.Commit();
             }
 
-            _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END openingsProcessed={openingsProcessed}, replaced={replaced}");
+            _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END wallsVisited={wallsVisited}, openingsProcessed={openingsProcessed}, replaced={replaced}, " +
+                         $"wallsSkippedNoOpenings={wallsSkippedNoOpenings}, wallsSkippedNoRegular={wallsSkippedNoRegular}, " +
+                         $"openingsSkippedNullBBox={openingsSkippedNullBBox}, openingsSkippedNoCandidates={openingsSkippedNoCandidates}, openingsSkippedNoCornerHits={openingsSkippedNoCornerHits}, " +
+                         $"totalRegularPanels={totalRegularPanels}, totalCandidates={totalCandidates}, totalCornerCommonHits={totalCornerCommonHits}");
         }
 
         private void ResetRegularPanelsCutsForIntersectingOpenings(List<CurtainWallDataDto> data)
