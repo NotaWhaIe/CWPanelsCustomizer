@@ -341,23 +341,6 @@ namespace CWPanelsCustomizer
             };
         }
 
-        private FamilyInstance PickClosestByXZ(List<FamilyInstance> candidates, XYZ targetCornerXZ, Transform inv)
-        {
-            FamilyInstance best = null;
-            double bestD2 = double.MaxValue;
-            foreach (var fi in candidates)
-            {
-                var bb = GetLocalBBoxFresh(fi, inv);
-                if (bb == null) continue;
-                var c = CenterOf(bb);
-                double dx = c.X - targetCornerXZ.X;
-                double dz = c.Z - targetCornerXZ.Z;
-                double d2 = dx * dx + dz * dz;
-                if (d2 < bestD2) { bestD2 = d2; best = fi; }
-            }
-            return best;
-        }
-
         private static bool PointInRect2D(XYZ p, double minX, double maxX, double minZ, double maxZ) =>
             p.X >= minX && p.X <= maxX && p.Z >= minZ && p.Z <= maxZ;
 
@@ -515,17 +498,10 @@ namespace CWPanelsCustomizer
             return TransformBoundingBoxToLocal(wb, inverseTransform);
         }
 
-        private BoundingBoxXYZ GetWorldBBoxFresh(Element e)
-        {
-            if (e == null) return null;
-            return e.get_BoundingBox(null);
-        }
-
-        // === CONVERT PANELS INSIDE OPENINGS TO EMPTY PANELS ===
-
-        private void ConvertPanelsInsideOpeningsToEmpty(List<CurtainWallDataDto> data)
+        private void ConvertPanelsInsideOpeningsToEmpty(List<CurtainWallDataDto> data, HashSet<ElementId> protectedPanelIds = null)
         {
             const string TAG = "[ConvertPanelsInsideOpeningsToEmpty]";
+            const double MIN_INSIDE_AREA_FRACTION = 0.80;
 
             ElementId emptyTypeId = FindEmptyPanelTypeId(_doc);
             if (emptyTypeId == null)
@@ -541,19 +517,86 @@ namespace CWPanelsCustomizer
                 return cx >= o.Min.X && cx <= o.Max.X && cz >= o.Min.Z && cz <= o.Max.Z;
             }
 
+            double AreaXZ(BoundingBoxXYZ b)
+            {
+                if (b == null) return 0.0;
+                double w = Math.Max(0.0, b.Max.X - b.Min.X);
+                double h = Math.Max(0.0, b.Max.Z - b.Min.Z);
+                return w * h;
+            }
+
+            double OverlapAreaXZ(BoundingBoxXYZ a, BoundingBoxXYZ b)
+            {
+                if (a == null || b == null) return 0.0;
+                double ox = Math.Max(0.0, Math.Min(a.Max.X, b.Max.X) - Math.Max(a.Min.X, b.Min.X));
+                double oz = Math.Max(0.0, Math.Min(a.Max.Z, b.Max.Z) - Math.Max(a.Min.Z, b.Min.Z));
+                return ox * oz;
+            }
+
+            bool IsCutoutPanelFamily(Element elem)
+            {
+                FamilyInstance fi = elem as FamilyInstance;
+                string fam = fi?.Symbol?.Family?.Name ?? string.Empty;
+                return string.Equals(fam, G_PANEL_FAMILY_NAME, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(fam, L_PANEL_FAMILY_NAME, StringComparison.OrdinalIgnoreCase);
+            }
+
+            bool IsMostlyInsideOpening(BoundingBoxXYZ panelBox, BoundingBoxXYZ openingBox, out double insideFraction)
+            {
+                insideFraction = 0.0;
+                double panelArea = AreaXZ(panelBox);
+                if (panelArea <= EPS) return false;
+
+                insideFraction = OverlapAreaXZ(panelBox, openingBox) / panelArea;
+                return CenterInside(panelBox, openingBox) && insideFraction >= MIN_INSIDE_AREA_FRACTION;
+            }
+
             int converted = 0, skipped = 0, errors = 0;
+            int skippedProtected = 0, skippedCutoutFamily = 0, skippedAlreadyEmpty = 0, skippedNotInside = 0;
             using (Transaction tx = new Transaction(_doc, "Convert panels inside openings to empty"))
             {
                 tx.Start();
                 foreach (CurtainWallDataDto cw in data)
                 foreach (OpeningModelDto opening in cw.IntersectingOpenings)
                 {
-                    if (opening.LocalBoundingBox == null) continue;
+                    BoundingBoxXYZ openingLocal = GetLocalBBoxFresh(opening.OpeningElement, cw.InverseTransform)
+                        ?? opening.LocalBoundingBox;
+                    if (openingLocal == null) continue;
                     foreach (CurtainWallPanelDto panel in cw.Panels)
                     {
-                        if (panel.LocalBoundingBox == null || !CenterInside(panel.LocalBoundingBox, opening.LocalBoundingBox)) continue;
                         Element elem = _doc.GetElement(panel.Id);
-                        if (elem == null || !elem.IsValidObject || elem.GetTypeId() == emptyTypeId) { skipped++; continue; }
+                        if (elem == null || !elem.IsValidObject) { skipped++; continue; }
+
+                        if (elem.GetTypeId() == emptyTypeId)
+                        {
+                            skippedAlreadyEmpty++;
+                            continue;
+                        }
+
+                        if (protectedPanelIds != null && protectedPanelIds.Contains(panel.Id))
+                        {
+                            skippedProtected++;
+                            _logger.Info($"{TAG} SKIP protected cutout candidate panelId={panel.Id.IntegerValue} openingId={opening.Id.IntegerValue} wallId={cw.Id.IntegerValue}");
+                            continue;
+                        }
+
+                        if (IsCutoutPanelFamily(elem))
+                        {
+                            skippedCutoutFamily++;
+                            _logger.Info($"{TAG} SKIP cutout family panelId={panel.Id.IntegerValue} openingId={opening.Id.IntegerValue} wallId={cw.Id.IntegerValue}");
+                            continue;
+                        }
+
+                        BoundingBoxXYZ panelLocal = GetLocalBBoxFresh(elem, cw.InverseTransform)
+                            ?? panel.LocalBoundingBox;
+                        if (panelLocal == null) { skipped++; continue; }
+
+                        if (!IsMostlyInsideOpening(panelLocal, openingLocal, out double insideFraction))
+                        {
+                            skippedNotInside++;
+                            continue;
+                        }
+
                         try
                         {
                             bool wasPinned = elem.Pinned;
@@ -561,14 +604,21 @@ namespace CWPanelsCustomizer
                             elem.ChangeTypeId(emptyTypeId);
                             if (wasPinned) { Element a = _doc.GetElement(panel.Id); if (a?.IsValidObject == true) a.Pinned = true; }
                             converted++;
-                            _logger.Info($"{TAG} CONVERTED panelId={panel.Id.IntegerValue} openingId={opening.Id.IntegerValue} wallId={cw.Id.IntegerValue}");
+                            _logger.Info($"{TAG} CONVERTED panelId={panel.Id.IntegerValue} openingId={opening.Id.IntegerValue} wallId={cw.Id.IntegerValue} insideFraction={insideFraction:P0}");
                         }
                         catch (Exception ex) { errors++; _logger.Warn($"{TAG} FAILED panelId={panel.Id.IntegerValue}: {ex.Message}"); }
                     }
                 }
                 tx.Commit();
             }
-            _logger.LogSummary(TAG, ("converted", converted), ("skipped", skipped), ("errors", errors));
+            _logger.LogSummary(TAG,
+                ("converted", converted),
+                ("skipped", skipped),
+                ("skippedProtected", skippedProtected),
+                ("skippedCutoutFamily", skippedCutoutFamily),
+                ("skippedAlreadyEmpty", skippedAlreadyEmpty),
+                ("skippedNotInside", skippedNotInside),
+                ("errors", errors));
         }
 
         private ElementId FindEmptyPanelTypeId(Document doc)

@@ -46,7 +46,7 @@ namespace CWPanelsCustomizer
 
         private const double WINDOW_CUTOUT_SCALE = 0.0;
 
-        private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Уголвая_В2.1";
+        private const string REGULAR_PANEL_FAMILY_NAME = "КРСТ_НВФ_Рядовая_В4";
         private const string REGULAR_PANEL_FAMILY_NAME_TYPE = "RAL 5005";
 
         private const string G_PANEL_FAMILY_NAME = "КРСТ_НВФ_С Г-образным вырезом_В2";
@@ -116,14 +116,17 @@ namespace CWPanelsCustomizer
                 // 2) Сбор данных
                 List<CurtainWallDataDto> data = GetElements(_doc);
 
-                // 2.5) Конвертация панелей внутри проёмов в пустые
-                ConvertPanelsInsideOpeningsToEmpty(data);
-
-                // 3) Сброс подрезок рядовых панелей по пересечению с проёмами
-                ResetRegularPanelsCutsForIntersectingOpenings(data);
+                // 3) Сброс подрезок всех рядовых панелей.
+                // У семейства может быть ненулевой дефолт "Подрезка"; перед расчётом подрезок и Г/L-заменой
+                // инициализируем все экземпляры в 0, чтобы панели вдали от окон не наследовали 50 мм.
+                ResetAllRegularPanelsCuts(data);
 
                 // 4) Замена рядовых панелей на угловые (где нужно)
-                ReplaceRegularPanelsWithCutoutPanels(data);
+                var protectedCutoutPanelIds = ReplaceRegularPanelsWithCutoutPanels(data);
+
+                // 4.5) Конвертация панелей внутри проёмов в пустые.
+                // Угловые панели, найденные на предыдущем шаге, защищаем от ошибочной конвертации.
+                ConvertPanelsInsideOpeningsToEmpty(data, protectedCutoutPanelIds);
 
                 // 5) Отзеркаливание панелей справа от окна, пересекающихся с BB окна
                 MirrorPanelsRightOfOpenings(data);

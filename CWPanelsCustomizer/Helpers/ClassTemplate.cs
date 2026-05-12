@@ -1,44 +1,44 @@
-﻿//using System;
-//using Autodesk.Revit.Attributes;
-//using Autodesk.Revit.DB;
-//using Autodesk.Revit.UI;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.UI;
 
-//namespace CWPanelsCustomizer.Helpers
-//{
-//    [Transaction(TransactionMode.Manual)]
-//    public class ClassTemplate : IExternalCommand
-//    {
-//        public static string IS_NAME => "*Название плагина";
-//        public static string IS_DESCRIPTION => "*Что делает плагин?";
+namespace CWPanelsCustomizer.Helpers
+{
+    // Шаблон класса для новой команды.
+    // Чтобы шаблон не попадал в список плагинов, не включайте атрибут Transaction
+    // и не наследуйте класс от IExternalCommand, пока создаваемая команда не готова.
+    // [Transaction(TransactionMode.Manual)]
+    public class ClassTemplate // : IExternalCommand
+    {
+        public static string IS_NAME => "*Название плагина";
+        public static string IS_DESCRIPTION => "*Что делает плагин?";
 
+        public static string IS_TAB_NAME => "#BIM";
+        public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
 
-//        public static string IS_TAB_NAME => "#BIM";
-//        public static string IS_IMAGE => "CWPanelsCustomizer.Images.a1.png";
+        private SphereByPoint _sphereByPoint;
+        private UIDocument _uidoc;
+        private Document _doc;
 
-//        private SphereByPoint _sphereByPoint;
-//        private UIDocument _uidoc;
-//        private Document _doc;
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            _uidoc = commandData.Application.ActiveUIDocument;
+            _doc = _uidoc.Document;
+            _sphereByPoint = new SphereByPoint(_doc);
 
-//        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
-//        {
-//            _uidoc = commandData.Application.ActiveUIDocument;
-//            _doc = _uidoc.Document;
-//            _sphereByPoint = new SphereByPoint(_doc);
+            using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
+            {
+                tg.Start();
 
-//            using (TransactionGroup tg = new TransactionGroup(_doc, IS_NAME))
-//            {
-//                tg.Start();
+                Method();
 
-//                Method();
+                tg.Assimilate();
+            }
 
-//                tg.Assimilate();
-//            }
+            return Result.Succeeded;
+        }
 
-//            return Result.Succeeded;
-//        }
-
-//        private void Method()
-//        {
-//        }
-//    }
-//}
+        private void Method()
+        {
+        }
+    }
+}

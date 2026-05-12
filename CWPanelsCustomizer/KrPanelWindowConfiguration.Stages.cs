@@ -14,7 +14,7 @@ namespace CWPanelsCustomizer
         // ==========================================================
         private void MirrorPanelsRightOfOpenings(List<CurtainWallDataDto> data)
         {
-            // v6: Local X side detection (как в рабочем методе) + правила для L / Г_В2 / Рядовая_В3
+            // v6: Local X side detection (как в рабочем методе) + правила для L / Г_В2 / рядовой панели
 
             const string TAG = "[MirrorPanelsRightOfOpenings v6_LocalRules]";
             const double SIDE_TOL_MM = 1.0;     // панели на оси окна не трогаем
@@ -156,7 +156,7 @@ namespace CWPanelsCustomizer
                             if (!Intersects3D(obLocal, pbLocal))
                                 continue;
 
-                            // фильтр по типу (участвуют только L, Г_В2, Рядовая_В3)
+                            // фильтр по типу (участвуют только L, Г_В2 и рядовая панель)
                             var typeKey = GetPanelTypeKey(fi);
 
                             bool isL = KeyContains(typeKey, L_PANEL_KEY);
@@ -184,7 +184,7 @@ namespace CWPanelsCustomizer
                             // Г_В2: слева -> mirror, справа -> ничего
                             if (isG && isLeft) needMirror = true;
 
-                            // Рядовая_В3: слева -> mirror, справа -> ничего
+                            // Рядовая: слева -> mirror, справа -> ничего
                             if (isReg && isLeft) needMirror = true;
 
                             // DTO как “источник истины” по намерению (по правилам)
@@ -241,7 +241,7 @@ namespace CWPanelsCustomizer
 
         private void CalculateAndSetCutoutPanelsCuts(List<CurtainWallDataDto> data)
         {
-            const string TAG = "[CalculateAndSetCutoutPanelsCuts_v3_BBox+Offsets]";
+            const string TAG = "[CalculateAndSetCutoutPanelsCuts_v5_CellBBox+SideWidthOffsets]";
 
             const string CUTOUT_G_FAMILY = G_PANEL_FAMILY_NAME;
             const string CUTOUT_L_FAMILY = L_PANEL_FAMILY_NAME;
@@ -254,6 +254,8 @@ namespace CWPanelsCustomizer
             const double G_HORIZONTAL_MM = 51.0;
             const double L_VERTICAL_MM = 77.0;
             const double L_HORIZONTAL_MM = 48.0;
+            const double LEFT_SIDE_WIDTH_CORRECTION_MM = -17.1;
+            const double RIGHT_SIDE_WIDTH_CORRECTION_MM = 41.9;
 
             _logger.Info($"{TAG} START");
 
@@ -301,6 +303,74 @@ namespace CWPanelsCustomizer
                 return 0.0;
             }
 
+            (CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)
+                BuildCutoutGeometry(CurtainWallPanelDto dto, Transform inv)
+            {
+                var fi = dto?.PanelElement;
+                var cellBox = dto?.LocalBoundingBox;
+                var freshBox = fi != null ? GetLocalBBoxFresh(fi, inv) : null;
+                var geomBox = cellBox ?? freshBox;
+                string geomSource = cellBox != null ? "cell" : "fresh";
+
+                return (dto, geomBox, cellBox, freshBox, geomSource);
+            }
+
+            (CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)
+                PickClosestByGeometryBox(
+                    List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)> candidates,
+                    XYZ targetCornerXZ)
+            {
+                (CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource) best = default;
+                double bestD2 = double.MaxValue;
+
+                foreach (var item in candidates)
+                {
+                    if (item.geomBox == null) continue;
+
+                    var c = CenterOf(item.geomBox);
+                    double dx = c.X - targetCornerXZ.X;
+                    double dz = c.Z - targetCornerXZ.Z;
+                    double d2 = dx * dx + dz * dz;
+
+                    if (d2 < bestD2)
+                    {
+                        bestD2 = d2;
+                        best = item;
+                    }
+                }
+
+                return best;
+            }
+
+            string FormatBBoxXZ(BoundingBoxXYZ box)
+            {
+                if (box == null) return "null";
+
+                return $"X=({box.Min.X * FEET_TO_MM:F1}..{box.Max.X * FEET_TO_MM:F1})mm " +
+                       $"Z=({box.Min.Z * FEET_TO_MM:F1}..{box.Max.Z * FEET_TO_MM:F1})mm " +
+                       $"W={(box.Max.X - box.Min.X) * FEET_TO_MM:F1}mm " +
+                       $"H={(box.Max.Z - box.Min.Z) * FEET_TO_MM:F1}mm";
+            }
+
+            string FormatCellFreshDelta(BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox)
+            {
+                if (cellBox == null || freshBox == null)
+                    return "";
+
+                double cellW = cellBox.Max.X - cellBox.Min.X;
+                double freshW = freshBox.Max.X - freshBox.Min.X;
+                double cellH = cellBox.Max.Z - cellBox.Min.Z;
+                double freshH = freshBox.Max.Z - freshBox.Min.Z;
+
+                return $"cellBBox[{FormatBBoxXZ(cellBox)}] freshBBox[{FormatBBoxXZ(freshBox)}] " +
+                       $"freshMinusCell(dMinX={(freshBox.Min.X - cellBox.Min.X) * FEET_TO_MM:F1}mm, " +
+                       $"dMaxX={(freshBox.Max.X - cellBox.Max.X) * FEET_TO_MM:F1}mm, " +
+                       $"dW={(freshW - cellW) * FEET_TO_MM:F1}mm, " +
+                       $"dMinZ={(freshBox.Min.Z - cellBox.Min.Z) * FEET_TO_MM:F1}mm, " +
+                       $"dMaxZ={(freshBox.Max.Z - cellBox.Max.Z) * FEET_TO_MM:F1}mm, " +
+                       $"dH={(freshH - cellH) * FEET_TO_MM:F1}mm)";
+            }
+
             int wallsProcessed = 0;
             int openingsProcessed = 0;
             int cutoutsIntersectingTotal = 0;
@@ -329,13 +399,13 @@ namespace CWPanelsCustomizer
                     if (openings.Count == 0 || panelsAll.Count == 0)
                         continue;
 
-                    // Все угловые кассеты (оба семейства)
+                    // Все угловые кассеты (оба семейства). Для расчета геометрии используем DTO:
+                    // LocalBoundingBox хранит исходную ячейку витража до смены семейства.
                     var cutoutPanels = panelsAll
                         .Where(p => p?.PanelElement != null)
-                        .Select(p => p.PanelElement)
-                        .Where(fi =>
+                        .Where(p =>
                         {
-                            var fam = fi.Symbol?.Family?.Name ?? "";
+                            var fam = p.PanelElement.Symbol?.Family?.Name ?? "";
                             return fam == CUTOUT_G_FAMILY || fam == CUTOUT_L_FAMILY;
                         })
                         .ToList();
@@ -360,15 +430,18 @@ namespace CWPanelsCustomizer
                         int opId = op.OpeningElement.Id.IntegerValue;
                         var opCenter = CenterOf(opBox);
 
-                        // Кандидаты: угловые панели, которые пересекаются с окном
-                        var intersectingCutouts = new List<FamilyInstance>();
-                        foreach (var fi in cutoutPanels)
-                        {
-                            var pBox = GetLocalBBoxFresh(fi, cw.InverseTransform);
-                            if (pBox == null) continue;
+                        // Кандидаты: угловые панели, которые пересекаются с окном.
+                        // Важно: пересечение считаем по исходной ячейке, а не по свежему bbox KR-семейства.
+                        var intersectingCutouts =
+                            new List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)>();
 
-                            if (Intersects3D(opBox, pBox))
-                                intersectingCutouts.Add(fi);
+                        foreach (var panel in cutoutPanels)
+                        {
+                            var item = BuildCutoutGeometry(panel, cw.InverseTransform);
+                            if (item.geomBox == null) continue;
+
+                            if (Intersects3D(opBox, item.geomBox))
+                                intersectingCutouts.Add(item);
                         }
 
                         cutoutsIntersectingTotal += intersectingCutouts.Count;
@@ -388,41 +461,47 @@ namespace CWPanelsCustomizer
                         var cornerBR = new XYZ(opBox.Max.X, 0, opBox.Min.Z);
 
                         // Квадранты относительно центра окна
-                        var leftTop = new List<FamilyInstance>();
-                        var rightTop = new List<FamilyInstance>();
-                        var leftBottom = new List<FamilyInstance>();
-                        var rightBottom = new List<FamilyInstance>();
+                        var leftTop =
+                            new List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)>();
+                        var rightTop =
+                            new List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)>();
+                        var leftBottom =
+                            new List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)>();
+                        var rightBottom =
+                            new List<(CurtainWallPanelDto dto, BoundingBoxXYZ geomBox, BoundingBoxXYZ cellBox, BoundingBoxXYZ freshBox, string geomSource)>();
 
-                        foreach (var fi in intersectingCutouts)
+                        foreach (var item in intersectingCutouts)
                         {
-                            var bb = GetLocalBBoxFresh(fi, cw.InverseTransform);
-                            if (bb == null) continue;
-
-                            var pc = CenterOf(bb);
+                            var pc = CenterOf(item.geomBox);
                             bool isLeft = pc.X < opCenter.X;
                             bool isTop = pc.Z > opCenter.Z;
 
-                            if (isLeft && isTop) leftTop.Add(fi);
-                            else if (!isLeft && isTop) rightTop.Add(fi);
-                            else if (isLeft && !isTop) leftBottom.Add(fi);
-                            else rightBottom.Add(fi);
+                            if (isLeft && isTop) leftTop.Add(item);
+                            else if (!isLeft && isTop) rightTop.Add(item);
+                            else if (isLeft && !isTop) leftBottom.Add(item);
+                            else rightBottom.Add(item);
                         }
 
                         // По одному на угол (ближайший к конкретному углу окна)
-                        FamilyInstance tl = leftTop.Count > 0 ? PickClosestByXZ(leftTop, cornerTL, cw.InverseTransform) : null;
-                        FamilyInstance tr = rightTop.Count > 0 ? PickClosestByXZ(rightTop, cornerTR, cw.InverseTransform) : null;
-                        FamilyInstance bl = leftBottom.Count > 0 ? PickClosestByXZ(leftBottom, cornerBL, cw.InverseTransform) : null;
-                        FamilyInstance br = rightBottom.Count > 0 ? PickClosestByXZ(rightBottom, cornerBR, cw.InverseTransform) : null;
+                        var tl = leftTop.Count > 0 ? PickClosestByGeometryBox(leftTop, cornerTL) : default;
+                        var tr = rightTop.Count > 0 ? PickClosestByGeometryBox(rightTop, cornerTR) : default;
+                        var bl = leftBottom.Count > 0 ? PickClosestByGeometryBox(leftBottom, cornerBL) : default;
+                        var br = rightBottom.Count > 0 ? PickClosestByGeometryBox(rightBottom, cornerBR) : default;
+
+                        var tlFi = tl.dto?.PanelElement;
+                        var trFi = tr.dto?.PanelElement;
+                        var blFi = bl.dto?.PanelElement;
+                        var brFi = br.dto?.PanelElement;
 
                         int cornersDetected =
-                            (tl != null ? 1 : 0) + (tr != null ? 1 : 0) + (bl != null ? 1 : 0) + (br != null ? 1 : 0);
+                            (tlFi != null ? 1 : 0) + (trFi != null ? 1 : 0) + (blFi != null ? 1 : 0) + (brFi != null ? 1 : 0);
                         cornersDetectedTotal += cornersDetected;
 
                         _logger.Info($"{TAG} wallId={wallId} openingId={opId} cornersDetected={cornersDetected} " +
-                                        $"TL={(tl?.Id.IntegerValue.ToString() ?? "null")} " +
-                                        $"TR={(tr?.Id.IntegerValue.ToString() ?? "null")} " +
-                                        $"BL={(bl?.Id.IntegerValue.ToString() ?? "null")} " +
-                                        $"BR={(br?.Id.IntegerValue.ToString() ?? "null")}");
+                                        $"TL={(tlFi?.Id.IntegerValue.ToString() ?? "null")} " +
+                                        $"TR={(trFi?.Id.IntegerValue.ToString() ?? "null")} " +
+                                        $"BL={(blFi?.Id.IntegerValue.ToString() ?? "null")} " +
+                                        $"BR={(brFi?.Id.IntegerValue.ToString() ?? "null")}");
 
                         // Базовые значения пересечения (W=X, H=Z)
                         double tlW = 0, tlH = 0;
@@ -432,33 +511,33 @@ namespace CWPanelsCustomizer
 
                         bool TLok = false, TRok = false, BLok = false, BRok = false;
 
-                        if (tl != null)
+                        if (tlFi != null)
                         {
-                            var bb = GetLocalBBoxFresh(tl, cw.InverseTransform);
-                            TLok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out tlW, out tlH);
-                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL panelId={tl.Id.IntegerValue} fam='{tl.Symbol?.Family?.Name}' " +
-                                            $"intersectOk={TLok} baseW={tlW * FEET_TO_MM:F1}mm baseH={tlH * FEET_TO_MM:F1}mm");
+                            TLok = TryGetBBoxIntersectionSizeXZ(opBox, tl.geomBox, out tlW, out tlH);
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL panelId={tlFi.Id.IntegerValue} fam='{tlFi.Symbol?.Family?.Name}' " +
+                                            $"geom={tl.geomSource} intersectOk={TLok} baseW={tlW * FEET_TO_MM:F1}mm baseH={tlH * FEET_TO_MM:F1}mm " +
+                                            $"{FormatCellFreshDelta(tl.cellBox, tl.freshBox)}");
                         }
-                        if (tr != null)
+                        if (trFi != null)
                         {
-                            var bb = GetLocalBBoxFresh(tr, cw.InverseTransform);
-                            TRok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out trW, out trH);
-                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR panelId={tr.Id.IntegerValue} fam='{tr.Symbol?.Family?.Name}' " +
-                                            $"intersectOk={TRok} baseW={trW * FEET_TO_MM:F1}mm baseH={trH * FEET_TO_MM:F1}mm");
+                            TRok = TryGetBBoxIntersectionSizeXZ(opBox, tr.geomBox, out trW, out trH);
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR panelId={trFi.Id.IntegerValue} fam='{trFi.Symbol?.Family?.Name}' " +
+                                            $"geom={tr.geomSource} intersectOk={TRok} baseW={trW * FEET_TO_MM:F1}mm baseH={trH * FEET_TO_MM:F1}mm " +
+                                            $"{FormatCellFreshDelta(tr.cellBox, tr.freshBox)}");
                         }
-                        if (bl != null)
+                        if (blFi != null)
                         {
-                            var bb = GetLocalBBoxFresh(bl, cw.InverseTransform);
-                            BLok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out blW, out blH);
-                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL panelId={bl.Id.IntegerValue} fam='{bl.Symbol?.Family?.Name}' " +
-                                            $"intersectOk={BLok} baseW={blW * FEET_TO_MM:F1}mm baseH={blH * FEET_TO_MM:F1}mm");
+                            BLok = TryGetBBoxIntersectionSizeXZ(opBox, bl.geomBox, out blW, out blH);
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL panelId={blFi.Id.IntegerValue} fam='{blFi.Symbol?.Family?.Name}' " +
+                                            $"geom={bl.geomSource} intersectOk={BLok} baseW={blW * FEET_TO_MM:F1}mm baseH={blH * FEET_TO_MM:F1}mm " +
+                                            $"{FormatCellFreshDelta(bl.cellBox, bl.freshBox)}");
                         }
-                        if (br != null)
+                        if (brFi != null)
                         {
-                            var bb = GetLocalBBoxFresh(br, cw.InverseTransform);
-                            BRok = (bb != null) && TryGetBBoxIntersectionSizeXZ(opBox, bb, out brW, out brH);
-                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR panelId={br.Id.IntegerValue} fam='{br.Symbol?.Family?.Name}' " +
-                                            $"intersectOk={BRok} baseW={brW * FEET_TO_MM:F1}mm baseH={brH * FEET_TO_MM:F1}mm");
+                            BRok = TryGetBBoxIntersectionSizeXZ(opBox, br.geomBox, out brW, out brH);
+                            _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR panelId={brFi.Id.IntegerValue} fam='{brFi.Symbol?.Family?.Name}' " +
+                                            $"geom={br.geomSource} intersectOk={BRok} baseW={brW * FEET_TO_MM:F1}mm baseH={brH * FEET_TO_MM:F1}mm " +
+                                            $"{FormatCellFreshDelta(br.cellBox, br.freshBox)}");
                         }
 
                         // Общая ширина стороны окна (база)
@@ -481,8 +560,9 @@ namespace CWPanelsCustomizer
 
                             double adjustedW = baseWidthFt;
                             double adjustedH = baseHeightFt;
+                            bool isKnownCutoutFamily = false;
 
-                            // Применяем правила из вашего ТЗ:
+                            // Применяем семейные поправки к базовому пересечению панели с проёмом:
                             // G-family:
                             //   Вырез_Высота: отнять VERTICAL_MM
                             //   Вырез_Ширина: отнять DELTA_MM
@@ -491,6 +571,7 @@ namespace CWPanelsCustomizer
                             //   Вырез_Ширина: отнять DELTA_MM
                             if (famName == CUTOUT_G_FAMILY)
                             {
+                                isKnownCutoutFamily = true;
                                 adjustedH = baseHeightFt - MmToFt(G_VERTICAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
                                 adjustedW = baseWidthFt - MmToFt(G_HORIZONTAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
 
@@ -499,16 +580,30 @@ namespace CWPanelsCustomizer
                             }
                             else if (famName == CUTOUT_L_FAMILY)
                             {
+                                isKnownCutoutFamily = true;
                                 adjustedH = baseHeightFt - MmToFt(L_VERTICAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
                                 adjustedW = baseWidthFt - MmToFt(L_HORIZONTAL_MM) + MmToFt(WINDOW_CUTOUT_SCALE);
 
                                 _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY L: " +
-                                                $"H = baseH - {L_VERTICAL_MM}mm, W = baseW + ({L_HORIZONTAL_MM}mm)");
+                                                $"H = baseH - {L_VERTICAL_MM}mm, W = baseW - ({L_HORIZONTAL_MM}mm)");
                             }
                             else
                             {
-                                // На всякий: если сюда попало что-то другое — пишем без поправок
                                 _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} unknown family -> no offsets");
+                            }
+
+                            if (isKnownCutoutFamily)
+                            {
+                                double sideWidthCorrectionMm = 0.0;
+                                if (cornerName == "TL" || cornerName == "BL")
+                                    sideWidthCorrectionMm = LEFT_SIDE_WIDTH_CORRECTION_MM;
+                                else if (cornerName == "TR" || cornerName == "BR")
+                                    sideWidthCorrectionMm = RIGHT_SIDE_WIDTH_CORRECTION_MM;
+
+                                adjustedW += MmToFt(sideWidthCorrectionMm);
+
+                                _logger.Info($"{TAG} {cornerName} panelId={fi.Id.IntegerValue} APPLY SIDE WIDTH CORRECTION: " +
+                                                $"W = W + ({sideWidthCorrectionMm:F1}mm)");
                             }
 
                             _logger.Info($"{TAG} wallId={wallId} openingId={opId} {cornerName} panelId={fi.Id.IntegerValue} " +
@@ -538,17 +633,17 @@ namespace CWPanelsCustomizer
                         }
 
                         // По стороне: ширина общая (left/right), высота индивидуальная по углу
-                        if (TLok) SetCutout(tl, "TL", leftWidth, tlH);
-                        else if (tl != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL exists but intersection invalid -> skip");
+                        if (TLok) SetCutout(tlFi, "TL", leftWidth, tlH);
+                        else if (tlFi != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TL exists but intersection invalid -> skip");
 
-                        if (BLok) SetCutout(bl, "BL", leftWidth, blH);
-                        else if (bl != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL exists but intersection invalid -> skip");
+                        if (BLok) SetCutout(blFi, "BL", leftWidth, blH);
+                        else if (blFi != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BL exists but intersection invalid -> skip");
 
-                        if (TRok) SetCutout(tr, "TR", rightWidth, trH);
-                        else if (tr != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR exists but intersection invalid -> skip");
+                        if (TRok) SetCutout(trFi, "TR", rightWidth, trH);
+                        else if (trFi != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} TR exists but intersection invalid -> skip");
 
-                        if (BRok) SetCutout(br, "BR", rightWidth, brH);
-                        else if (br != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR exists but intersection invalid -> skip");
+                        if (BRok) SetCutout(brFi, "BR", rightWidth, brH);
+                        else if (brFi != null) _logger.Info($"{TAG} wallId={wallId} openingId={opId} BR exists but intersection invalid -> skip");
                     }
                 }
 
@@ -561,14 +656,13 @@ namespace CWPanelsCustomizer
                             $"cutoutPanelsUpdated={cutoutPanelsUpdated}, paramsSet={paramsSet}");
         }
 
-        private void ReplaceRegularPanelsWithCutoutPanels(List<CurtainWallDataDto> data)
+        private HashSet<ElementId> ReplaceRegularPanelsWithCutoutPanels(List<CurtainWallDataDto> data)
         {
             const string REGULAR_FAMILY = REGULAR_PANEL_FAMILY_NAME;
 
             const string CUTOUT_TOP_FAMILY = G_PANEL_FAMILY_NAME;
             const string CUTOUT_BOTTOM_FAMILY = L_PANEL_FAMILY_NAME;
 
-            // ====== ДОБАВЛЕНО: ИМЕНА ТИПОВ (FamilySymbol) ======
             const string CUTOUT_TOP_FAMILY_TYPE = G_PANEL_FAMILY_NAME_TYPE;
             const string CUTOUT_BOTTOM_TYPE = L_PANEL_FAMILY_NAME_TYPE;
 
@@ -577,13 +671,14 @@ namespace CWPanelsCustomizer
 
             _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] START");
 
+            var protectedCutoutPanelIds = new HashSet<ElementId>();
+
             if (data == null || data.Count == 0)
             {
                 _logger.Info("[ReplaceRegularPanelsWithCutoutPanels] data is null/empty -> skip");
-                return;
+                return protectedCutoutPanelIds;
             }
 
-            // ====== ИЗМЕНЕНО: теперь берём СИМВОЛЫ по семейству+типу ======
             var topSymbol = GetFamilySymbolByFamilyAndType(CUTOUT_TOP_FAMILY, CUTOUT_TOP_FAMILY_TYPE);
             var bottomSymbol = GetFamilySymbolByFamilyAndType(CUTOUT_BOTTOM_FAMILY, CUTOUT_BOTTOM_TYPE);
 
@@ -596,7 +691,7 @@ namespace CWPanelsCustomizer
                 TaskDialog.Show("Ошибка",
                     "Не найдены типы (FamilySymbol) для замены угловых панелей.\n" +
                     "Проверь, что в проект загружены нужные семейства и нужные ИМЕНА ТИПОВ совпадают с константами.");
-                return;
+                return protectedCutoutPanelIds;
             }
 
             int openingsProcessed = 0;
@@ -669,7 +764,7 @@ namespace CWPanelsCustomizer
                         var candidate = new List<(FamilyInstance fi, BoundingBoxXYZ bbox)>();
                         foreach (var p in regularPanels)
                         {
-                            var pb = p.LocalBoundingBox;
+                            var pb = GetLocalBBoxFresh(p.PanelElement, wallData.InverseTransform) ?? p.LocalBoundingBox;
                             if (pb == null) continue;
 
                             var reduced = ReduceBBox(pb, PANEL_BBOX_REDUCTION_FACTOR);
@@ -700,7 +795,15 @@ namespace CWPanelsCustomizer
                     ("BR", windowCornerBR, new XYZ(0,0,-1), new XYZ( 1,0,0)),
                 };
 
-                        var panelsToReplace = new HashSet<FamilyInstance>();
+                        var panelsToReplace = new Dictionary<ElementId, (FamilyInstance fi, string cornerName)>();
+
+                        void AddPanelForCorner(FamilyInstance fi, string cornerName)
+                        {
+                            if (fi == null) return;
+                            if (!panelsToReplace.ContainsKey(fi.Id))
+                                panelsToReplace[fi.Id] = (fi, cornerName);
+                            protectedCutoutPanelIds.Add(fi.Id);
+                        }
 
                         foreach (var c in corners)
                         {
@@ -719,10 +822,10 @@ namespace CWPanelsCustomizer
                             _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} corner={c.name} hitV={hitV.Count} hitH={hitH.Count} common={common.Count} commonIds={string.Join(",", common.Select(fi => fi.Id.IntegerValue))}");
 
                             foreach (var fi in common)
-                                panelsToReplace.Add(fi);
+                                AddPanelForCorner(fi, c.name);
                         }
 
-                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} panelsToReplace={panelsToReplace.Count} ids={string.Join(",", panelsToReplace.Select(fi => fi.Id.IntegerValue))}");
+                        _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] wallId={wallId} openingId={openingId} panelsToReplace={panelsToReplace.Count} ids={string.Join(",", panelsToReplace.Keys.Select(id => id.IntegerValue))}");
 
                         if (panelsToReplace.Count == 0)
                         {
@@ -730,18 +833,18 @@ namespace CWPanelsCustomizer
                             continue;
                         }
 
-                        var windowCenter = CenterOf(ob);
-
-                        foreach (var panelFi in panelsToReplace)
+                        foreach (var item in panelsToReplace.Values)
                         {
+                            var panelFi = item.fi;
+                            string cornerName = item.cornerName;
                             if (panelFi == null) continue;
                             if (alreadyReplaced.Contains(panelFi.Id)) continue;
 
-                            var pbDto = regularPanels.FirstOrDefault(x => x.PanelElement?.Id == panelFi.Id)?.LocalBoundingBox;
+                            var pbDto = GetLocalBBoxFresh(panelFi, wallData.InverseTransform)
+                                ?? regularPanels.FirstOrDefault(x => x.PanelElement?.Id == panelFi.Id)?.LocalBoundingBox;
                             if (pbDto == null) continue;
 
-                            var panelCenter = CenterOf(pbDto);
-                            bool isTop = panelCenter.Z > windowCenter.Z;
+                            bool isTop = cornerName == "TL" || cornerName == "TR";
 
                             var target = isTop ? topSymbol : bottomSymbol;
 
@@ -753,13 +856,12 @@ namespace CWPanelsCustomizer
                                     continue;
                                 }
 
-                                // ВОТ ТУТ именно и назначается ТИП (FamilySymbol)
                                 panelFi.Symbol = target;
 
                                 alreadyReplaced.Add(panelFi.Id);
                                 replaced++;
                                 _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] REPLACED wallId={wallId} openingId={openingId} panelId={panelFi.Id.IntegerValue} " +
-                                             $"isTop={isTop} targetFamily='{target.FamilyName}' targetType='{target.Name}'");
+                                             $"corner={cornerName} isTop={isTop} targetFamily='{target.FamilyName}' targetType='{target.Name}'");
                             }
                             catch (Exception ex)
                             {
@@ -775,12 +877,14 @@ namespace CWPanelsCustomizer
             _logger.Info($"[ReplaceRegularPanelsWithCutoutPanels] END wallsVisited={wallsVisited}, openingsProcessed={openingsProcessed}, replaced={replaced}, " +
                          $"wallsSkippedNoOpenings={wallsSkippedNoOpenings}, wallsSkippedNoRegular={wallsSkippedNoRegular}, " +
                          $"openingsSkippedNullBBox={openingsSkippedNullBBox}, openingsSkippedNoCandidates={openingsSkippedNoCandidates}, openingsSkippedNoCornerHits={openingsSkippedNoCornerHits}, " +
-                         $"totalRegularPanels={totalRegularPanels}, totalCandidates={totalCandidates}, totalCornerCommonHits={totalCornerCommonHits}");
+                         $"totalRegularPanels={totalRegularPanels}, totalCandidates={totalCandidates}, totalCornerCommonHits={totalCornerCommonHits}, " +
+                         $"protectedCutoutPanelIds={protectedCutoutPanelIds.Count}");
+            return protectedCutoutPanelIds;
         }
 
-        private void ResetRegularPanelsCutsForIntersectingOpenings(List<CurtainWallDataDto> data)
+        private void ResetAllRegularPanelsCuts(List<CurtainWallDataDto> data)
         {
-            const string TAG = "[ResetRegularPanelsCutsForIntersectingOpenings]";
+            const string TAG = "[ResetAllRegularPanelsCuts]";
             const string REGULAR_PANEL_FAMILY = REGULAR_PANEL_FAMILY_NAME;
             _logger.Info($"{TAG} START");
 
@@ -797,7 +901,7 @@ namespace CWPanelsCustomizer
 
             try
             {
-                using (var t = new Transaction(_doc, "Сброс подрезок рядовых панелей по пересечению с проёмами"))
+                using (var t = new Transaction(_doc, "Сброс подрезок всех рядовых панелей"))
                 {
                     t.Start();
 
@@ -810,53 +914,29 @@ namespace CWPanelsCustomizer
 
                         var openings = wallDto.IntersectingOpenings ?? new List<OpeningModelDto>();
                         var panels = wallDto.Panels ?? new List<CurtainWallPanelDto>();
+                        openingsProcessed += openings.Count;
 
-                        if (openings.Count == 0 || panels.Count == 0)
+                        if (panels.Count == 0)
                             continue;
 
-                        foreach (var opening in openings)
+                        foreach (var p in panels)
                         {
-                            if (opening == null || opening.OpeningElement == null)
+                            if (p == null || p.PanelElement == null)
                                 continue;
 
-                            openingsProcessed++;
-
-                            var opLocal = opening.LocalBoundingBox;
-                            if (opLocal == null)
+                            var fi = p.PanelElement;
+                            var fam = fi.Symbol?.Family?.Name ?? "";
+                            if (!fam.Contains(REGULAR_PANEL_FAMILY))
                                 continue;
 
-                            var intersectingPanels = new List<CurtainWallPanelDto>();
+                            bool set1 = TrySetDouble(fi, "Подрезка", 0.0);
+                            bool set2 = TrySetDouble(fi, "Подрезка_Верх", 0.0);
+                            bool set3 = TrySetDouble(fi, "Подрезка_Низ", 0.0);
 
-                            foreach (var p in panels)
-                            {
-                                if (p == null || p.PanelElement == null)
-                                    continue;
-
-                                var fam = p.PanelElement.Symbol?.Family?.Name ?? "";
-                                if (!fam.Contains(REGULAR_PANEL_FAMILY))
-                                    continue;
-
-                                var pLocal = p.LocalBoundingBox;
-                                if (pLocal == null)
-                                    continue;
-
-                                if (Intersects3D(opLocal, pLocal))
-                                    intersectingPanels.Add(p);
-                            }
-
-                            foreach (var p in intersectingPanels)
-                            {
-                                var fi = p.PanelElement;
-
-                                bool set1 = TrySetDouble(fi, "Подрезка", 0.0);
-                                bool set2 = TrySetDouble(fi, "Подрезка_Верх", 0.0);
-                                bool set3 = TrySetDouble(fi, "Подрезка_Низ", 0.0);
-
-                                panelsTouched++;
-                                if (set1) paramsSet++;
-                                if (set2) paramsSet++;
-                                if (set3) paramsSet++;
-                            }
+                            panelsTouched++;
+                            if (set1) paramsSet++;
+                            if (set2) paramsSet++;
+                            if (set3) paramsSet++;
                         }
                     }
 
@@ -868,7 +948,7 @@ namespace CWPanelsCustomizer
             catch (Exception ex)
             {
                 _logger.Info($"{TAG} ERROR: {ex}");
-                TaskDialog.Show("ResetRegularPanelsCutsForIntersectingOpenings", ex.Message);
+                TaskDialog.Show("ResetAllRegularPanelsCuts", ex.Message);
             }
 
             bool TrySetDouble(FamilyInstance fi, string paramName, double value)
@@ -900,6 +980,7 @@ namespace CWPanelsCustomizer
             const double DELTA_MM_Regular = -43.0;
             const double VERTICAL_MM_Regular = 7.0;
             const double HORIZONTAL_MM_Regular = 55.0;
+            const double SIDE_CLEARANCE_CORRECTION_MM_Regular = 39.0;
 
             int totalPanelsTouched = 0;
             int totalParamsSet = 0;
@@ -991,7 +1072,11 @@ namespace CWPanelsCustomizer
                             {
                                 paramName = "Подрезка";
                                 baseValueFt = OverlapX(opBox, pBox);
-                                adjustedValueFt = baseValueFt - MmToFt(HORIZONTAL_MM_Regular) + MmToFt(DELTA_MM_Regular) + MmToFt(WINDOW_CUTOUT_SCALE);
+                                adjustedValueFt = baseValueFt
+                                                  - MmToFt(HORIZONTAL_MM_Regular)
+                                                  + MmToFt(DELTA_MM_Regular)
+                                                  + MmToFt(SIDE_CLEARANCE_CORRECTION_MM_Regular)
+                                                  + MmToFt(WINDOW_CUTOUT_SCALE);
                             }
 
                             if (baseValueFt <= EPS) continue;
